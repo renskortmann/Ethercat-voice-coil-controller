@@ -41,6 +41,9 @@
 #define AMC_VENDOR_ID       0xBD
 #define CST_MODE            0x0A
 #define STATUS_WORD_MASK    0x6F
+/** StatusWord Fault bit. Tested on its own rather than via STATUS_WORD_MASK: CiA402 leaves bit 5
+ *  (Quick stop) don't-care in the Fault state, and this drive sets it (Fault reads 0x_628). */
+#define STATUS_FAULT_BIT    0x0008
 #define STATE_READY_TO_SWITCH_ON  0x21
 #define STATE_SWITCHED_ON         0x23
 #define STATE_OPERATION_ENABLED   0x27
@@ -48,6 +51,7 @@
 #define CTRL_SWITCH_ON      0x0007
 #define CTRL_ENABLE_OP      0x000F
 #define CTRL_DISABLE_VOLT   0x0000
+#define CTRL_FAULT_RESET    0x0080
 
 #define SERVO_DRIVE_TYPE    0x0192
 
