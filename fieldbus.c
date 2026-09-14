@@ -121,7 +121,7 @@ fieldbus_start(Fieldbus *fieldbus)
    return FALSE;
 }
 
-/** \brief Shut down EtherCAT network: request Init state on all slaves and close socket
+/** \brief Shut down EtherCAT network: wind the drive down, then request Init state and close socket
  *  \param fieldbus Fieldbus context
  */
 void
@@ -129,6 +129,28 @@ fieldbus_stop(Fieldbus *fieldbus)
 {
    ecx_contextt *context = &fieldbus->context;
    ec_slavet *slave = context->slavelist;
+   ec_groupt *grp = context->grouplist + fieldbus->group;
+   rx_pdo_t *rx = (rx_pdo_t *)grp->outputs;
+   int i;
+
+   /* Wind the drive down before the bus. Dropping straight from OPERATIONAL to INIT makes cyclic
+    * data vanish while the drive is still enabled, which it latches as a comm error (2065.21h =
+    * Fault) and carries into the next session as a blocked enable path. */
+   printf("Disabling drive voltage... ");
+   rx->controlword = CTRL_DISABLE_VOLT;
+   for (i = 0; i < 20; i++)
+   {
+      ecx_send_processdata(context);
+      ecx_receive_processdata(context, EC_TIMEOUTRET);
+      osal_usleep(1000);
+   }
+   printf("done\n");
+
+   printf("Requesting safe operational state... ");
+   slave->state = EC_STATE_SAFE_OP;
+   ecx_writestate(context, 0);
+   ecx_statecheck(context, 0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE);
+   printf("done\n");
 
    printf("Requesting init state on all slaves... ");
    slave->state = EC_STATE_INIT;
