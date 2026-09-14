@@ -4,7 +4,7 @@
 Reads the most recent ``data/voice_coil_log_*.csv`` file and draws stacked
 axes sharing the time axis:
 
-* current (A)  -- actual / target / demand current, with show/hide checkboxes
+* current (A)  -- actual / target / demand current (left axis) and bus voltage (right axis), with show/hide checkboxes
 * ai1_value (V)
 * ai2_value (V)
 * power (W) / energy (J) -- bus-referred instantaneous power (left axis) and
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import csv
 import glob
+import math
 import os
 import sys
 
@@ -61,8 +62,12 @@ AXES = [
 # Plotted on a twin y-axis of the "power (W)" axis (cumulative, different scale/units).
 ENERGY_SIGNAL = {"energy": ("energy_J", "tab:purple")}
 
+# Plotted on a twin y-axis of the "current (A)" axis (different scale/units).
+BUS_VOLTAGE_SIGNAL = {"bus voltage": ("dc_bus_voltage_V", "tab:gray")}
+
 ALL_SIGNALS = {label: spec for _, _, group in AXES for label, spec in group.items()}
 ALL_SIGNALS.update(ENERGY_SIGNAL)
+ALL_SIGNALS.update(BUS_VOLTAGE_SIGNAL)
 
 
 def latest_log() -> str:
@@ -98,8 +103,33 @@ def read_log(path: str):
     return time_s, series
 
 
-def add_checkboxes(fig, rect, signals, lines, ax):
-    """Attach a CheckButtons group at figure coords ``rect`` for ``signals``."""
+def time_weighted_mean(time_s: list[float], values: list[float]) -> float:
+    """Time-weighted average of ``values`` over ``time_s`` (trapezoidal integration)."""
+    duration = time_s[-1] - time_s[0]
+    if duration <= 0:
+        return float("nan")
+    return sum(
+        0.5 * (v0 + v1) * (t1 - t0)
+        for t0, t1, v0, v1 in zip(time_s, time_s[1:], values, values[1:])
+    ) / duration
+
+
+def rms_power(time_s: list[float], power_W: list[float]) -> float:
+    """Time-weighted RMS of ``power_W`` over ``time_s`` (trapezoidal integration)."""
+    duration = time_s[-1] - time_s[0]
+    if duration <= 0:
+        return float("nan")
+    mean_sq = time_weighted_mean(time_s, [p**2 for p in power_W])
+    return math.sqrt(mean_sq)
+
+
+def add_checkboxes(fig, rect, signals, lines, ax, place_legend, extra_handles=()):
+    """Attach a CheckButtons group at figure coords ``rect`` for ``signals``.
+
+    ``place_legend`` re-draws the axis legend for a given list of visible
+    handles (see ``main``); ``extra_handles`` are always-visible lines (e.g.
+    a twin-axis trace) kept in the legend regardless of checkbox state.
+    """
     labels = list(signals)
     colours = [signals[l][1] for l in labels]
     rax = fig.add_axes(rect)
@@ -116,10 +146,10 @@ def add_checkboxes(fig, rect, signals, lines, ax):
     def toggle(label: str) -> None:
         line = lines[label]
         line.set_visible(not line.get_visible())
-        visible = [lines[l] for l in labels if lines[l].get_visible()]
+        visible = [lines[l] for l in labels if lines[l].get_visible()] + list(extra_handles)
         legend = ax.get_legend()
         if visible:
-            ax.legend(handles=visible, loc="upper right")
+            place_legend(visible)
         elif legend is not None:
             legend.remove()
         # Rescale the y-axis to fit only the visible traces.
@@ -137,10 +167,20 @@ def main() -> None:
     if not time_s:
         sys.exit(f"no usable rows in {path}")
 
+    avg_power_W = time_weighted_mean(time_s, series["power"])
+    avg_rms_power_W = rms_power(time_s, series["power"])
+    total_energy_J = series["energy"][-1] if series["energy"] else float("nan")
+    print(f"Average power: {avg_power_W:.2f} W")
+    print(f"Average RMS power: {avg_rms_power_W:.2f} W")
+    print(f"Total energy delivered: {total_energy_J:.2f} J")
+
     n = len(AXES)
     fig, axarr = plt.subplots(n, 1, sharex=True, figsize=(11, 10))
-    fig.subplots_adjust(top=0.88, bottom=0.07, hspace=0.55)
+    fig.subplots_adjust(top=0.88, bottom=0.11, hspace=0.7)
     fig.suptitle(f"Voice-coil log — {os.path.basename(path)}", y=0.99)
+
+    LEGEND_GAP = 0.012  # figure-fraction gap between an axis box and what sits above it
+    CHECKBOX_WIDTH = 0.45  # figure-fraction width reserved for the checkbox group
 
     lines: dict = {}
     checks = []
@@ -150,9 +190,11 @@ def main() -> None:
             lines[label] = line
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
-        ax.legend(loc="upper right")
         if i == n - 1:
             ax.set_xlabel("time_s (s)")
+
+        handles = [lines[l] for l in group]
+        extra_handles = ()
 
         if ylabel == "power (W)":
             label, (column, colour) = next(iter(ENERGY_SIGNAL.items()))
@@ -162,16 +204,56 @@ def main() -> None:
             )
             lines[label] = line
             ax_energy.set_ylabel("energy (J)")
-            handles = [lines["power"], line]
-            ax.legend(handles=handles, loc="upper right")
+            handles.append(line)
+
+        if ylabel == "current (A)":
+            label, (column, colour) = next(iter(BUS_VOLTAGE_SIGNAL.items()))
+            ax_voltage = ax.twinx()
+            (line,) = ax_voltage.plot(
+                time_s, series[label], label=label, color=colour, lw=1.0, linestyle="--"
+            )
+            lines[label] = line
+            ax_voltage.set_ylabel("bus voltage (V)")
+            handles.append(line)
+            extra_handles = (line,)
+
+        # Legend sits above the axis box; on the checkbox axis it is pushed
+        # right so it doesn't overlap the checkbox group also placed there.
+        pos = ax.get_position()
+        legend_x0 = pos.x0
+        if has_checks:
+            checkbox_rect = [pos.x0, pos.y1 + LEGEND_GAP, CHECKBOX_WIDTH, 0.055]
+            legend_x0 = pos.x0 + CHECKBOX_WIDTH + 0.015
+
+        def place_legend(visible_handles, ax=ax, x0=legend_x0, y0=pos.y1 + LEGEND_GAP):
+            return ax.legend(
+                handles=visible_handles,
+                loc="lower left",
+                bbox_to_anchor=(x0, y0),
+                bbox_transform=fig.transFigure,
+                fontsize="small",
+                borderaxespad=0,
+            )
+
+        place_legend(handles)
 
         if has_checks:
-            # Checkbox group just above this axis.
-            pos = ax.get_position()
-            rect = [pos.x0, pos.y1 + 0.012, 0.6, 0.055]
-            checks.append(add_checkboxes(fig, rect, group, lines, ax))
+            checks.append(
+                add_checkboxes(fig, checkbox_rect, group, lines, ax, place_legend, extra_handles=extra_handles)
+            )
 
     fig._checkboxes = checks  # keep refs alive
+
+    fig.text(
+        0.5,
+        0.02,
+        f"Average power: {avg_power_W:.1f} W    |    Average RMS power: {avg_rms_power_W:.1f} W"
+        f"    |    Total energy delivered: {total_energy_J:.1f} J",
+        ha="center",
+        va="bottom",
+        fontsize=11,
+        fontweight="bold",
+    )
 
     plt.show()
 
