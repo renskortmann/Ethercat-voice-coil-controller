@@ -73,8 +73,11 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 
    printf("\nStarting %.0f-second cyclic loop... expected WKC: %d\n", RUN_DURATION_S, expected_wkc);
 
-   /* Configure DC SYNC0 */
-   ecx_dcsync0(context, fieldbus->amc_slave_index, TRUE, (uint32_t)cycle_ns, 0);
+   /* SYNC0 stays off: this loop paces itself from CLOCK_MONOTONIC and never phase-locks to the
+    * slave's DC clock, so with SYNC0 enabled the frame-arrival phase walks at the two oscillators'
+    * ppm difference until it crosses the SYNC0 edge and the drive trips on a sync/comm error.
+    * Current-loop-only CST needs no DC sync; the drive runs SM-synchronous instead. */
+   ecx_dcsync0(context, fieldbus->amc_slave_index, FALSE, 0, 0);
 
    clock_gettime(CLOCK_MONOTONIC, &next_cycle);
    /* Advance to the first real deadline (loop start + one cycle) before entering the loop,
