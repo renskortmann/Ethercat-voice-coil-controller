@@ -169,6 +169,40 @@ read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s)
 
    printf("Reading drive diagnostic objects via SDO...\n");
 
+   /* Read 603Fh (CiA402 Error Code): the drive's own name for the most recent fault, which
+    * distinguishes causes that the 2002h bitfields alone leave ambiguous. */
+   psize = sizeof(value16);
+   if (ecx_SDOread(context, fieldbus->amc_slave_index, ERROR_CODE_INDEX, 0x00, FALSE,
+                   &psize, &value16, EC_TIMEOUTSAFE) <= 0)
+   {
+      printf("  603Fh (Error Code): SDO read failed (object not supported by this drive?)\n");
+   }
+   else
+   {
+      printf("  603Fh (Error Code): 0x%04X ", value16);
+      switch (value16)
+      {
+         case 0x0000: printf("[No error]\n"); break;
+         case 0x2310: printf("[Continuous over current]\n"); break;
+         case 0x2320: printf("[Short circuit / earth leakage]\n"); break;
+         case 0x3210: printf("[DC link over voltage]\n"); break;
+         case 0x3220: printf("[DC link under voltage]\n"); break;
+         case 0x4310: printf("[Drive over temperature]\n"); break;
+         case 0x5530: printf("[EEPROM fault]\n"); break;
+         case 0x6320: printf("[Parameter error]\n"); break;
+         case 0x7300: printf("[Sensor fault]\n"); break;
+         case 0x7305: printf("[Incremental sensor 1 fault]\n"); break;
+         case 0x7500: printf("[Communication fault]\n"); break;
+         case 0x8110: printf("[CAN overrun]\n"); break;
+         case 0x8130: printf("[Life guard / heartbeat error - node guarding]\n"); break;
+         case 0x8140: printf("[Recovered from bus off]\n"); break;
+         case 0x8210: printf("[PDO not processed due to length error]\n"); break;
+         case 0x8220: printf("[PDO length exceeded]\n"); break;
+         case 0xFF00: printf("[Manufacturer specific]\n"); break;
+         default: printf("[Unlisted code - check AMC documentation]\n"); break;
+      }
+   }
+
    /* Read 2002h.01h–.07h (Drive Status: current active fault flags) */
    printf("  2002h (Drive Status):\n");
    for (sub = 0x01; sub <= 0x07; sub++)

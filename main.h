@@ -74,6 +74,7 @@
 #define STATUS_WORD_INDEX              0x6041    // StatusWord (16-bit) for CiA402 state machine
 #define MODE_OF_OPERATION_INDEX        0x6060    // Mode (16-bit) for CiA402 mode of operation
 #define INTERPOLATION_TIME_INDEX       0x60C2    // Interpolation Time Period (32-bit) for CST mode
+#define ERROR_CODE_INDEX               0x603F    // CiA402 Error Code (16-bit) naming the most recent fault
 #define AI_VALUE_INDEX                 0x201A    // Analog Input scaled value (16-bit signed)
 #define POWER_BOARD_INFORMATION_INDEX  0x20D8 // Power Board Information (32-bit unsigned) for reading KP
 #define POWER_BRIDGE_VALUES_INDEX      0x200F // Power Bridge Values (16-bit signed) for reading DC Bus Voltage
