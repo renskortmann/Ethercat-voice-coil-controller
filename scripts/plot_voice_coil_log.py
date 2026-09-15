@@ -6,7 +6,8 @@ axes sharing the time axis:
 
 * current (A)  -- actual / target / demand current (left axis) and bus voltage (right axis), with show/hide checkboxes
 * ai1_value (V)
-* ai2_value (V)
+* ai2_g (g)  -- accelerometer g-force derived from ai2_value, raw and
+  low-pass filtered
 * power (W) / energy (J) -- bus-referred instantaneous power (left axis) and
   cumulative energy delivered to the motor (right, twin axis)
 
@@ -48,9 +49,12 @@ AXES = [
         {"ai1_value": (("ai1_value_V", "ai1_value"), "tab:brown")},
     ),
     (
-        "ai2_value (V)",
+        "ai2_g (g)",
         False,
-        {"ai2_value": (("ai2_value_V", "ai2_value"), "tab:cyan")},
+        {
+            "ai2_g": (None, "tab:cyan"),
+            "ai2_g_lp": (None, "tab:blue"),
+        },
     ),
     (
         "power (W)",
@@ -58,6 +62,17 @@ AXES = [
         {"power": ("power_W", "tab:red")},
     ),
 ]
+
+# ai2_g is derived from ai2_value (accelerometer, 0.00775 V/g) rather than read
+# from a column of its own.
+AI2_G_SCALE = 101.5 # 129.03 # -148.15 # 
+AI2_G_OFFSET = -84.6 # 103.45 # 
+
+# Cut-off of the first-order low-pass applied to ai2_g to give ai2_g_lp.
+AI2_G_LP_CUTOFF_HZ = 20.0
+
+# Read from the log but not plotted directly (ai2_g is derived from it).
+RAW_SIGNALS = {"ai2_value": (("ai2_value_V", "ai2_value"), None)}
 
 # Plotted on a twin y-axis of the "power (W)" axis (cumulative, different scale/units).
 ENERGY_SIGNAL = {"energy": ("energy_J", "tab:purple")}
@@ -67,6 +82,7 @@ BUS_VOLTAGE_SIGNAL = {"bus voltage": ("dc_bus_voltage_V", "tab:gray")}
 
 ALL_SIGNALS = {label: spec for _, _, group in AXES for label, spec in group.items()}
 ALL_SIGNALS.update(ENERGY_SIGNAL)
+ALL_SIGNALS.update(RAW_SIGNALS)
 ALL_SIGNALS.update(BUS_VOLTAGE_SIGNAL)
 
 
@@ -91,6 +107,8 @@ def read_log(path: str):
                 continue
             time_s.append(t)
             for label, (column, _) in ALL_SIGNALS.items():
+                if column is None:  # derived signal, filled in later
+                    continue
                 names = (column,) if isinstance(column, str) else column
                 value = float("nan")
                 for name in names:
@@ -121,6 +139,32 @@ def rms_power(time_s: list[float], power_W: list[float]) -> float:
         return float("nan")
     mean_sq = time_weighted_mean(time_s, [p**2 for p in power_W])
     return math.sqrt(mean_sq)
+
+
+def low_pass(time_s: list[float], values: list[float], cutoff_hz: float) -> list[float]:
+    """First-order RC low-pass of ``values``, sampled at the times in ``time_s``.
+
+    The smoothing factor is recomputed per sample from the actual timestep, so
+    the response stays right when the log is not evenly sampled. Non-finite
+    samples pass through as NaN without poisoning the filter state.
+    """
+    rc = 1.0 / (2.0 * math.pi * cutoff_hz)
+    out: list[float] = []
+    y = None
+    t_prev = None
+    for t, v in zip(time_s, values):
+        if not math.isfinite(v):
+            out.append(float("nan"))
+            continue
+        if y is None:
+            y = v
+        else:
+            dt = max(t - t_prev, 0.0)
+            alpha = dt / (rc + dt)
+            y += alpha * (v - y)
+        t_prev = t
+        out.append(y)
+    return out
 
 
 def add_checkboxes(fig, rect, signals, lines, ax, place_legend, extra_handles=()):
@@ -167,17 +211,27 @@ def main() -> None:
     if not time_s:
         sys.exit(f"no usable rows in {path}")
 
+    series["ai2_g"] = [AI2_G_SCALE * v + AI2_G_OFFSET for v in series["ai2_value"]]
+
+    series["ai2_g_lp"] = low_pass(time_s, series["ai2_g"], AI2_G_LP_CUTOFF_HZ)
+
     avg_power_W = time_weighted_mean(time_s, series["power"])
     avg_rms_power_W = rms_power(time_s, series["power"])
+    avg_ai1_value_V = time_weighted_mean(time_s, series["ai1_value"])
+    avg_ai2_value_V = time_weighted_mean(time_s, series["ai2_value"])
+    avg_ai2_g = time_weighted_mean(time_s, series["ai2_g"])
     total_energy_J = series["energy"][-1] if series["energy"] else float("nan")
     print(f"Average power: {avg_power_W:.2f} W")
     print(f"Average RMS power: {avg_rms_power_W:.2f} W")
     print(f"Total energy delivered: {total_energy_J:.2f} J")
+    print(f"Average AI1 value: {avg_ai1_value_V:.4f} V")
+    print(f"Average AI2 value: {avg_ai2_value_V:.4f} V")
+    print(f"Average AI2 g-force: {avg_ai2_g:.2f} g")
 
     n = len(AXES)
     fig, axarr = plt.subplots(n, 1, sharex=True, figsize=(11, 10))
     fig.subplots_adjust(top=0.88, bottom=0.11, hspace=0.7)
-    fig.suptitle(f"Voice-coil log — {os.path.basename(path)}", y=0.99)
+    fig.suptitle(f"{os.path.basename(path)}", y=0.99)
 
     LEGEND_GAP = 0.012  # figure-fraction gap between an axis box and what sits above it
     CHECKBOX_WIDTH = 0.45  # figure-fraction width reserved for the checkbox group
