@@ -77,9 +77,13 @@ For predictable sub-millisecond latency the host needs kernel and NIC tuning
 (core isolation, C-state limits, IRQ affinity, NIC offload/coalescing off).
 Details and measured results are in:
 
-- [docs/rt-implementation.md](docs/rt-implementation.md) — code + system changes and benchmarks
-- [docs/realtime-tuning.md](docs/realtime-tuning.md) — kernel command-line tuning guide
+- [docs/realtime-tuning.md](docs/realtime-tuning.md) — host tuning guide: kernel command line,
+  C-states, NIC selection/affinity, firmware checks, and the measured baseline
+- [docs/rt-implementation.md](docs/rt-implementation.md) — design record for the application-level
+  RT work: what the code does to keep the loop deterministic, and why
 - [scripts/setup-ethercat-nic.sh](scripts/setup-ethercat-nic.sh) — dedicates and tunes the fieldbus NIC
+- [scripts/benchmark-rt.sh](scripts/benchmark-rt.sh) — runs the controller N times under a named
+  config and aggregates jitter/PDO percentiles, for comparing tuning changes
 
 ## Plotting
 
