@@ -253,7 +253,7 @@ Every exported `data/voice_coil_log_*.csv` carries two instrumentation columns:
 
 and the run prints a `missed deadlines: N (max jitter X us)` summary line.
 
-**Interpreting `cycle_jitter_us`:** its mean is around **−435 µs**, which is a fixed phase
+**Interpreting `cycle_jitter_us`:** its mean is around **−460 µs**, which is a fixed phase
 offset against SYNC0, not jitter. Only the spread around that mean is jitter. And on this
 machine the two columns are almost perfectly correlated — `r(cycle_jitter_us,
 pdo_exchange_us) ≈ 0.98–1.00` — so cycle jitter here is essentially *all* EtherCAT frame
@@ -279,25 +279,31 @@ It snapshots the config state (cmdline, governor, IRQ affinities, every IRQ thre
 priority) to `data/benchmark/<label>.meta` so a result can be traced back to what was
 actually set. Treat anything under a few µs of separation as noise.
 
-### Baseline on the previous NIC (`eno1`)
+### Current baseline (`enp2s0`, I210)
 
-> **Stale for the current hardware.** These numbers were measured on `eno1` (82579LM,
-> single MSI vector) before the fieldbus moved to `enp2s0` (I210, MSI-X). They are kept as
-> the reference the new NIC has to beat. Re-measure with
-> `sudo scripts/benchmark-rt.sh --label i210 --runs 5` and compare against a
-> re-collected `eno1` label if you still have the hardware cabled.
+Pooled over 5 runs / 89,995 cycles with all tuning above active, 500 µs budget, alongside
+the previous NIC for comparison:
 
-Pooled over 5 runs / 89,995 cycles with all tuning of the time active, 500 µs budget:
-
-| metric | value | % of cycle |
+| metric | `enp2s0` (I210, MSI-X) | `eno1` (82579LM, MSI) |
 |---|---|---|
-| `pdo_exchange_us` p50 | 60.7 µs | 12% |
-| `pdo_exchange_us` p99 | 67.3 µs | 13% |
-| `pdo_exchange_us` p99.9 | 166.7 µs | 33% |
-| `pdo_exchange_us` max | 276.4 µs | 55% |
-| cycles > 150 µs | 98 / 89,995 (0.11%) | |
-| `cycle_jitter_us` spread (p0.1–p99.9) | 112.5 µs | |
-| missed deadlines / faults | **0** | |
+| `pdo_exchange_us` p50 | **35.1 µs** (7%) | 60.7 µs (12%) |
+| `pdo_exchange_us` p99 | **40.7 µs** (8%) | 67.3 µs (13%) |
+| `pdo_exchange_us` p99.9 | **45.6 µs** (9%) | 166.7 µs (33%) |
+| `pdo_exchange_us` max | **62.1 µs** (12%) | 276.4 µs (55%) |
+| per-run max, 5 runs | 51.2 – 62.1 µs | 229.1 – 276.4 µs |
+| cycles > 100 µs | **0** | 174 / 89,995 |
+| cycles > 150 µs | **0** | 98 / 89,995 |
+| `cycle_jitter_us` sd | **2.13 µs** | 5.96 µs |
+| `cycle_jitter_us` spread (p0.1–p99.9) | **16.0 µs** | 112.5 µs |
+| missed deadlines / faults | **0** | 0 |
+
+The tail did not merely shrink, it vanished: not one cycle in 89,995 exceeded 100 µs, and
+the per-run maxima now sit in an 11 µs band instead of a 47 µs one. Worst case is 12% of
+the cycle budget, down from 55%.
+
+The two columns stay consistent through the change, which is a useful check that the
+measurement is coherent: mean `pdo_exchange_us` fell 25.6 µs and mean `cycle_jitter_us`
+fell 25.7 µs — a 0.1 µs residual. The entire gain is frame round-trip time.
 
 Zero frame loss over the same runs (`ethtool -S eno1` showed `rx_packets == tx_packets`,
 all error counters zero).
@@ -327,50 +333,38 @@ Measured over 5 runs each way, every percentile moved by ≲1 µs and the signs 
 initially showed p99 improving 82.5 → 64.8 µs; that was entirely run-to-run variance in the
 single baseline run. **Do not re-apply this, and do not trust single-run comparisons.**
 
-The negative result is also evidence: if the spikes below were host-side contention between
-these handlers, priority would have moved them.
+It was also read at the time as evidence that the spikes were not contention between these
+handlers. That much held up — see [Resolved: the ~100 ms periodic
+interferer](#resolved-the-100-ms-periodic-interferer), which was in the NIC path but not in
+IRQ-thread scheduling.
 
 The *method* generalises even though the measurement does not: do not trust a single-run
 comparison, whatever the hardware.
 
-## Open: the ~100 ms periodic interferer
+## Resolved: the ~100 ms periodic interferer
 
-Observed on `eno1`; **not yet re-checked on `enp2s0`**. Re-running the two experiments below
-on the new NIC is now the cheapest next step — if the interferer disappears with the NIC
-change, it was host-side after all and the phase argument below is wrong.
+On `eno1` the residual tail was not random. Cycles with `pdo_exchange_us` above ~150 µs
+arrived at gaps that were near-exact multiples of **100 ms**, at a phase stable within a run
+but randomly different in each run (87.5, 29.0, 6.0, 63.5, 36.0 ms across five runs), with
+amplitudes clustered at roughly 168, 201 and 221 µs against a 60.7 µs median.
 
-The residual tail is not random. In every run, cycles with `pdo_exchange_us` above ~150 µs
-arrive at gaps that are near-exact multiples of **100 ms**, at a phase that is stable within
-a run but **randomly different in each run**:
+**It disappeared entirely when the fieldbus moved to `enp2s0`** — zero cycles above 100 µs
+in 89,995. So it lived in the `eno1` / `e1000e` / PCH path: the NIC, its driver, or that
+card's shared DMI route. Not the drive, and not the DC/SYNC0 servo. The exact mechanism was
+never identified and no longer matters.
 
-| run | phase at t≈1 s | phase at t≈9 s |
-|---|---|---|
-| 133557 | 87.5 ms | 90.5 ms |
-| 133610 | 29.0 ms | 28.0 ms |
-| 133624 | 6.0 ms | 1.5 ms |
-| 133637 | 63.5 ms | 58.0 ms |
-| 133651 | 36.0 ms | 32.0 ms |
+**The reasoning that pointed the other way was wrong, and is worth recording.** The
+re-randomising phase was read as evidence against a host-side source, on the grounds that a
+host timer would land at a phase set by the host clock and so repeat across runs. That
+inference does not hold: a per-run random phase is equally consistent with a host-side
+source whose phase is set when the *link* comes up rather than by wall-clock time — driver
+state initialised at interface open, for instance. Phase structure alone could not
+distinguish "host-side" from "device-side" here, and it was over-read.
 
-Amplitudes cluster at discrete levels — roughly 168, 201 and 221 µs — against a 60.7 µs
-median.
-
-The re-randomising phase argues **against** a host-side source: a kernel timer, `i915`
-vblank or any free-running 10 Hz host task would land at a phase set by the host clock, and
-the loop's time base is that same clock, so the phase would repeat across runs. It points
-instead at something whose phase is established when the EtherCAT link starts — the drive,
-the DC/SYNC0 servo, or a beat between the master's send timing and the drive's internal
-update window.
-
-Two experiments would discriminate, neither yet run:
-
-1. **Headless.** `sudo systemctl isolate multi-user.target`, then collect a label. If the
-   spikes survive with the GPU and compositor gone, the host is exonerated.
-2. **Change the cycle period.** Set `CYCLE_TIME_MS` to `1.0`, rebuild, collect a label. If
-   the interferer stays at 100 ms it is an absolute-time ~10 Hz source; if it scales to
-   ~200 ms it is a cycle-count artifact (200 cycles) and therefore DC phasing.
-
-This is a margin-understanding question, not a defect: worst case is 55% of the cycle
-budget with zero missed deadlines.
+The general lesson is the cheaper one: **swapping the suspect component is worth more than
+another round of inference from the same log.** Both discriminating experiments proposed at
+the time (headless, and changing the cycle period) would have cost more and told us less
+than moving the cable.
 
 ## Development environment caveat
 
