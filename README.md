@@ -49,7 +49,7 @@ prefix, point CMake at it with `cmake -B build -DCMAKE_PREFIX_PATH=<install-dir>
 ## Run
 
 ```bash
-sudo ./ethercat-voice-coil-controller <IFNAME>      # e.g. eno1
+sudo ./ethercat-voice-coil-controller <IFNAME>      # e.g. enp2s0
 ```
 
 Run with no arguments to list available network interfaces. Output CSVs are written

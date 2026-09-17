@@ -13,15 +13,21 @@
 # carries your internet / SSH session. Moving internet to the other NIC is a
 # manual step (see the notes printed at the end).
 #
-# Recommended NIC on this machine: eno1 (Intel 82579LM, e1000e, MSI, PCH-integrated)
-# in preference to enp1s2 (Intel 82544GC, e1000, shared legacy IRQ 18, legacy PCI).
-# See docs/rt-implementation.md.
+# Recommended NIC on this machine: enp2s0 (Intel I210-T1, igb, PCIe, MSI-X with
+# per-queue vectors) in preference to eno1 (82579LM, e1000e, single MSI vector,
+# shares DMI with the rest of the PCH) or enp3s2 (82544GC, e1000, shared legacy
+# IRQ 18 on 33/66 MHz PCI). See docs/realtime-tuning.md.
+#
+# --undo reverses a previous run: it hands the interface back to NetworkManager
+# with offloads and autonegotiation restored, so a former fieldbus NIC can be
+# used as an ordinary network interface again.
 #
 # Usage:
 #   sudo scripts/setup-ethercat-nic.sh [--iface IFACE] [--speed 100|1000|auto]
 #                                      [--rt-core N] [--install-service] [--yes]
+#   sudo scripts/setup-ethercat-nic.sh --undo --iface IFACE [--yes]
 #
-#   --iface IFACE        EtherCAT interface (default: eno1)
+#   --iface IFACE        EtherCAT interface (default: enp2s0)
 #   --speed 100|1000|auto Fix link speed to avoid autoneg flaps (default: 100,
 #                        the normal EtherCAT 100BASE-TX rate; use auto to keep
 #                        autonegotiation, e.g. through a switch that needs it)
@@ -29,15 +35,19 @@
 #                        (default: read RT_CPU_CORE from main.h, else 1)
 #   --install-service    Also install a systemd oneshot so the tuning is
 #                        re-applied automatically on every boot
+#   --undo               Undo a previous run on IFACE: remove the drop-ins,
+#                        disable the boot service, restore offloads/EEE/autoneg,
+#                        and return the interface to NetworkManager
 #   --yes                Don't prompt for confirmation
 #
 set -euo pipefail
 
-IFACE="eno1"
+IFACE="enp2s0"
 SPEED="100"
 RT_CORE=""
 INSTALL_SERVICE=0
 ASSUME_YES=0
+UNDO=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
@@ -48,6 +58,7 @@ while [[ $# -gt 0 ]]; do
 		--speed)           SPEED="$2"; shift 2 ;;
 		--rt-core)         RT_CORE="$2"; shift 2 ;;
 		--install-service) INSTALL_SERVICE=1; shift ;;
+		--undo)            UNDO=1; shift ;;
 		--yes|-y)          ASSUME_YES=1; shift ;;
 		-h|--help)         grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -67,6 +78,98 @@ if [[ ! -e "/sys/class/net/$IFACE" ]]; then
 	echo "error: interface '$IFACE' does not exist" >&2
 	echo "available: $(ls /sys/class/net | grep -v '^lo$' | tr '\n' ' ')" >&2
 	exit 1
+fi
+
+try() { echo "   + $*"; "$@" 2>/dev/null || echo "     (not supported -- ignored)"; }
+
+# Apply ethtool sub-options ONE AT A TIME. ethtool fails the whole request if any
+# single key/value pair is unsupported by the driver, so bundling (e.g. passing
+# rx-frames to e1000e, which only takes rx-usecs) would silently drop every other
+# setting in the call -- including the important one.
+try_each() {  # try_each <ethtool-flag> <key1> <val1> [<key2> <val2> ...]
+	local flag="$1"; shift
+	while [[ $# -ge 2 ]]; do
+		try ethtool "$flag" "$IFACE" "$1" "$2"
+		shift 2
+	done
+}
+
+# ---------------------------------------------------------------------------
+# --undo: hand the interface back to the OS as an ordinary network device.
+# Reverses every persistent change a previous run made. Used when the fieldbus
+# moves to a different NIC and the old one becomes a normal network interface.
+# ---------------------------------------------------------------------------
+undo_iface() {
+	echo "=============================================================="
+	echo " Undo EtherCAT dedication of $IFACE  (driver: ${DRIVER:-?})"
+	echo "=============================================================="
+
+	if [[ $ASSUME_YES -ne 1 ]]; then
+		echo
+		read -r -p "Return '$IFACE' to normal network use? [y/N] " ans
+		[[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "aborted."; exit 1; }
+	fi
+
+	echo
+	echo "-- [1/4] disabling boot-time tuning service"
+	if systemctl is-enabled "ethercat-nic@${IFACE}.service" >/dev/null 2>&1; then
+		systemctl disable --now "ethercat-nic@${IFACE}.service" >/dev/null 2>&1 || true
+		echo "   disabled ethercat-nic@${IFACE}.service"
+	else
+		echo "   not enabled -- nothing to do"
+	fi
+
+	echo "-- [2/4] removing drop-ins"
+	local f found=0
+	for f in "/etc/NetworkManager/conf.d/99-ethercat-${IFACE}.conf" \
+	         "/etc/sysctl.d/99-ethercat-${IFACE}.conf" \
+	         "/etc/systemd/network/99-ethercat-${IFACE}.network"; do
+		[[ -e "$f" ]] || continue
+		rm -f "$f"; echo "   removed $f"; found=1
+	done
+	[[ $found -eq 1 ]] || echo "   none present"
+	sysctl -qw "net.ipv6.conf.${IFACE//./\/}.disable_ipv6=0" 2>/dev/null || true
+	echo "   re-enabled IPv6 on $IFACE"
+
+	# Restore driver defaults. An internet NIC wants the offloads and adaptive
+	# coalescing that the fieldbus path deliberately turns off.
+	echo "-- [3/4] restoring link settings"
+	try_each -K tso on gso on gro on sg on rxvlan on txvlan on
+	try ethtool --set-eee "$IFACE" eee on
+	try_each -A autoneg on rx on tx on
+	try ethtool -C "$IFACE" adaptive-rx on
+	try ethtool -s "$IFACE" autoneg on
+
+	echo "-- [4/4] returning $IFACE to NetworkManager"
+	if command -v nmcli >/dev/null && systemctl is-active --quiet NetworkManager; then
+		nmcli general reload 2>/dev/null || systemctl reload NetworkManager || true
+		nmcli device set "$IFACE" managed yes 2>/dev/null || true
+		echo "   $IFACE is managed again"
+	else
+		echo "   NetworkManager not active -- bring the interface up yourself"
+	fi
+	systemctl is-active --quiet systemd-networkd 2>/dev/null && networkctl reload 2>/dev/null || true
+	ip link set "$IFACE" up 2>/dev/null || true
+
+	cat <<EOF
+
+==============================================================
+ Done. $IFACE is an ordinary network interface again.
+
+ It has no connection profile yet if the previous run deleted one.
+ Give it an address, e.g. DHCP:
+     sudo nmcli connection add type ethernet ifname $IFACE \\
+          con-name internet ipv4.method auto ipv6.method auto
+     sudo nmcli connection up internet
+
+ Check:  ip -br addr show $IFACE ; ip route
+==============================================================
+EOF
+}
+
+if [[ $UNDO -eq 1 ]]; then
+	undo_iface
+	exit 0
 fi
 
 # Resolve the RT core (only used for the IRQ-affinity sanity check).
@@ -118,12 +221,16 @@ if command -v nmcli >/dev/null && systemctl is-active --quiet NetworkManager; th
 unmanaged-devices=interface-name:$IFACE
 EOF
 	echo "   wrote $NM_DROPIN"
-	# Delete any leftover connection profiles bound to this interface.
-	while read -r name dev; do
-		[[ "$dev" == "$IFACE" ]] || continue
+	# Delete any leftover connection profiles bound to this interface. Match on
+	# connection.interface-name, not the DEVICE column: DEVICE is empty while the
+	# device is unavailable, and NAME may contain spaces ("Wired connection 1").
+	while IFS= read -r name; do
+		[[ -n "$name" ]] || continue
+		bound="$(nmcli -g connection.interface-name connection show "$name" 2>/dev/null)"
+		[[ "$bound" == "$IFACE" ]] || continue
 		echo "   deleting stale connection profile: $name"
 		nmcli connection delete "$name" >/dev/null 2>&1 || true
-	done < <(nmcli -t -f NAME,DEVICE connection show 2>/dev/null | awk -F: '{print $1, $2}')
+	done < <(nmcli -t -g NAME connection show 2>/dev/null)
 	nmcli general reload 2>/dev/null || systemctl reload NetworkManager || true
 	nmcli device set "$IFACE" managed no 2>/dev/null || true
 else
@@ -157,20 +264,6 @@ echo "   wrote $SYSCTL_DROPIN"
 #    reject some of them, which is fine.
 # ---------------------------------------------------------------------------
 echo "-- [3/5] applying ethtool RT tuning"
-
-try() { echo "   + $*"; "$@" 2>/dev/null || echo "     (not supported -- ignored)"; }
-
-# Apply ethtool sub-options ONE AT A TIME. ethtool fails the whole request if any
-# single key/value pair is unsupported by the driver, so bundling (e.g. passing
-# rx-frames to e1000e, which only takes rx-usecs) would silently drop every other
-# setting in the call -- including the important one.
-try_each() {  # try_each <ethtool-flag> <key1> <val1> [<key2> <val2> ...]
-	local flag="$1"; shift
-	while [[ $# -ge 2 ]]; do
-		try ethtool "$flag" "$IFACE" "$1" "$2"
-		shift 2
-	done
-}
 
 # Offloads: batching/segmentation add latency and jitter, and TSO on the 82579
 # family is linked to "Detected Hardware Unit Hang". Turn them all off.
@@ -235,7 +328,7 @@ for irq in $IRQS; do
 	fi
 	if [[ "$kind" == *IO-APIC* && "${shared:-0}" -gt 0 ]]; then
 		echo "       !! legacy IRQ shared with another device -- expect extra jitter."
-		echo "          Prefer a NIC with a dedicated MSI vector (e.g. eno1 on this box)."
+		echo "          Prefer a NIC with its own MSI/MSI-X vectors (e.g. enp2s0 on this box)."
 	fi
 done
 
@@ -277,11 +370,12 @@ cat <<EOF
  Done. $IFACE is now a dedicated, RT-tuned EtherCAT link.
 
  Run the fieldbus against it:
-     sudo ./voice-coil $IFACE
+     sudo ./ethercat-voice-coil-controller $IFACE
 
- To move internet to the other NIC (e.g. enp1s2), if not already:
-     sudo nmcli device set enp1s2 managed yes
-     sudo nmcli connection add type ethernet ifname enp1s2 \\
+ If internet still needs moving to another NIC, release the old fieldbus NIC
+ first, then give the new one an address:
+     sudo $0 --undo --iface <OLD_IFACE>
+     sudo nmcli connection add type ethernet ifname <NET_IFACE> \\
           con-name internet ipv4.method auto ipv6.method auto
      sudo nmcli connection up internet
 

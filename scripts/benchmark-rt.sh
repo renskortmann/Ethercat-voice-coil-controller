@@ -22,7 +22,7 @@
 #
 #   --label NAME     collect runs and file them under NAME (e.g. baseline, chrt85)
 #   --runs N         number of runs to collect (default: 5)
-#   --iface IFACE    EtherCAT interface (default: eno1)
+#   --iface IFACE    EtherCAT interface (default: enp2s0)
 #   --settle S       seconds to wait between runs (default: 3)
 #   --skip-s S       seconds of each run to discard as startup transient
 #                    (default: 1.0 -- matches the DC sync settling time)
@@ -32,13 +32,13 @@
 #
 # Typical use:
 #   sudo scripts/benchmark-rt.sh --label baseline --runs 5
-#   sudo chrt -f -p 85 $(pgrep -f 'irq/32-eno1')
+#   sudo chrt -f -p 85 $(ps -eLo tid,comm | awk '/irq\/.*-enp2s0/{print $1}')
 #   sudo scripts/benchmark-rt.sh --label chrt85 --runs 5
 #   sudo scripts/benchmark-rt.sh --compare baseline chrt85
 #
 set -euo pipefail
 
-IFACE="eno1"
+IFACE="enp2s0"
 RUNS=5
 LABEL=""
 SETTLE=3

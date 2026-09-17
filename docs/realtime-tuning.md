@@ -15,9 +15,14 @@ those, with concrete values for the current target machine.
 | Machine | Dell OptiPlex 7010, BIOS `A29` (06/28/2018 — the final release for this model) |
 | CPU | Intel Core i5-3550, 4 cores (0–3), no hyperthreading |
 | Kernel | `6.8.1-1059-realtime` (PREEMPT_RT) — already the right kernel, see [Kernel choice](#kernel-choice) |
-| EtherCAT NIC | `eno1` (Intel 82579LM, `e1000e`, PCH-integrated `0000:00:19.0`, **private MSI vector**) |
-| Internet NIC | `enp1s2` (Intel 82544GC, `e1000`, legacy PCI, shared IRQ 18) — carries IP/DHCP, not the fieldbus |
-| Launched as | `sudo ./ethercat-voice-coil-controller eno1` |
+| EtherCAT NIC | `enp2s0` (Intel I210-T1, `igb`, PCIe `0000:02:00.0`, **MSI-X, 4 rx + 4 tx queues**) |
+| Internet NIC | `eno1` (Intel 82579LM, `e1000e`, PCH-integrated `0000:00:19.0`) — carries IP/DHCP, not the fieldbus |
+| Spare | `enp3s2` (Intel 82544GC, `e1000`, legacy PCI, shared IRQ 18) — unused |
+| Launched as | `sudo ./ethercat-voice-coil-controller enp2s0` |
+
+Interface names are bus-derived and **change when a card is added or moved**: fitting the
+I210 shifted the 82544GC from `enp1s2` to `enp3s2`. Only `eno1` is stable, being named by
+firmware index. Re-check `ip -br link` after any hardware change.
 
 The NIC choice is deliberate — see [EtherCAT NIC selection](#ethercat-nic-selection)
 below. Do not swap them back.
@@ -26,7 +31,7 @@ CPU core assignment:
 
 | core | role |
 |---|---|
-| 0 | OS housekeeping — EtherCAT NIC IRQ, plus `i915` and `xhci_hcd` |
+| 0 | OS housekeeping — `i915`, `xhci_hcd`, and some of the NIC's MSI-X vectors |
 | **1** | **reserved for the RT cyclic loop** — must match `RT_CPU_CORE` in [`main.h`](../main.h) |
 | 2, 3 | OS housekeeping, everything else |
 
@@ -120,26 +125,31 @@ Deep C-states can also be disabled in BIOS/UEFI for a belt-and-braces guarantee.
 This machine has two Intel NICs. The fieldbus runs on the one with the better host-side
 latency path:
 
-| | `eno1` — 82579LM | `enp1s2` — 82544GC |
-|---|---|---|
-| Driver | `e1000e` | `e1000` |
-| Location | PCH LAN-on-motherboard, DMI-integrated | add-in card on legacy 33/66 MHz PCI |
-| Interrupt | **private MSI vector** | **legacy IO-APIC line 18, shared with `i801_smbus`** |
-| Coalescing control | yes (`rx-usecs`) | none exposed |
+| | `enp2s0` — I210-T1 | `eno1` — 82579LM | `enp3s2` — 82544GC |
+|---|---|---|---|
+| Driver | `igb` | `e1000e` | `e1000` |
+| Location | add-in card, PCIe 2.5 GT/s ×1 | PCH LAN-on-motherboard, DMI | add-in card, legacy 33/66 MHz PCI |
+| Interrupt | **MSI-X, per-queue vectors** | private MSI vector | legacy IO-APIC 18, shared with `i801_smbus` |
+| Coalescing control | yes (`rx-usecs`, `adaptive-rx`) | yes (`rx-usecs`) | none exposed |
+| Hardware timestamping | yes (PTP clock) | no | no |
 
-`eno1` wins on the two things that matter for PDO jitter: a private MSI vector (no
-shared-handler demux on every SMBus transaction) and an integrated DMA path (no legacy-PCI
-bus arbitration). `enp1s2` carries internet instead — its shared IRQ is harmless there.
+`enp2s0` wins on interrupt path and bus isolation: MSI-X gives each queue its own vector
+that can be pinned independently, and a dedicated PCIe link avoids sharing DMI bandwidth
+with everything else hanging off the PCH. `eno1` carries internet instead. `enp3s2` is
+spare — its shared legacy IRQ makes it the worst of the three for a fieldbus.
 
 ## NIC interrupt affinity
 
-`eno1` has a **private MSI vector**, so unlike `enp1s2` it shares no handler with another
-device. The IRQ number is assigned at boot and **changes across BIOS and kernel updates**
-(it moved from 26 to 32 with BIOS A29), so always look it up rather than hardcoding it:
+`enp2s0` uses **MSI-X with one vector per queue**, so it has several IRQs, not one — a
+control vector plus one per TxRx queue. None is shared with another device. IRQ numbers are
+assigned at boot and **change across BIOS, kernel and hardware changes** (the old `eno1`
+vector moved 26 → 32 with BIOS A29), so always look them up rather than hardcoding:
 
 ```bash
-grep eno1 /proc/interrupts                  # -> e.g. "32: ... IR-PCI-MSI-0000:00:19.0 0-edge eno1"
-cat /proc/irq/<N>/smp_affinity_list         # must not include core 1
+grep enp2s0 /proc/interrupts                # one line per vector: enp2s0, enp2s0-TxRx-0..3
+for n in $(grep -oP '^\s*\K[0-9]+(?=:.*enp2s0)' /proc/interrupts); do
+    echo "IRQ $n -> $(cat /proc/irq/$n/smp_affinity_list)"   # none may include core 1
+done
 ```
 
 `irqaffinity=0,2,3` on the kernel command line already keeps it off the RT core, so the
@@ -160,8 +170,8 @@ IRQBALANCE_BANNED_CPUS=00000002
 
 SOEM does its packet TX/RX **inline on the loop thread** — there is no separate SOEM RX
 thread to prioritise. Under PREEMPT_RT the `e1000e` NAPI poll runs in the context of the
-`irq/<N>-eno1` thread, so that thread is the whole host-side RX completion path and
-`pdo_exchange_us` measures it end to end.
+`irq/<N>-enp2s0-TxRx-*` thread handling that queue, so those threads are the whole
+host-side RX completion path and `pdo_exchange_us` measures it end to end.
 
 ## NIC RT tuning
 
@@ -173,8 +183,15 @@ segmentation/receive offloads (batching adds jitter; TSO on the 82579 family is 
 renegotiating mid-run. `--install-service` persists it across reboots via
 `ethercat-nic@.service`.
 
+`--undo` reverses all of it, so a NIC released from fieldbus duty can be used as an ordinary
+network interface again:
+
 ```bash
-sudo ./scripts/setup-ethercat-nic.sh --iface eno1 --install-service
+sudo ./scripts/setup-ethercat-nic.sh --undo --iface <OLD_IFACE>
+```
+
+```bash
+sudo ./scripts/setup-ethercat-nic.sh --iface enp2s0 --install-service
 ```
 
 **On link speed:** the fieldbus link is 100 Mb/s because **EtherCAT is 100BASE-TX full
@@ -182,7 +199,8 @@ duplex only** — the slave controller silicon has no gigabit PHY, so forcing `s
 simply fails to link, whatever the host NIC advertises. It would also buy nothing: the PDOs
 are 12 B out / 14 B in, which hits the 64-byte Ethernet minimum, so a round trip is ~13 µs
 of wire time at 100 Mb/s against a measured `pdo_exchange_us` of ~61 µs. The rate is not the
-bottleneck. (`enp1s2` negotiating 1000 Mb/s is the internet NIC and unrelated.)
+bottleneck. The I210 is a gigabit card, but it runs the fieldbus at 100/full like any
+other EtherCAT master would.
 
 ## Firmware / BIOS
 
@@ -261,9 +279,15 @@ It snapshots the config state (cmdline, governor, IRQ affinities, every IRQ thre
 priority) to `data/benchmark/<label>.meta` so a result can be traced back to what was
 actually set. Treat anything under a few µs of separation as noise.
 
-### Current baseline
+### Baseline on the previous NIC (`eno1`)
 
-Pooled over 5 runs / 89,995 cycles with all tuning above active, 500 µs budget:
+> **Stale for the current hardware.** These numbers were measured on `eno1` (82579LM,
+> single MSI vector) before the fieldbus moved to `enp2s0` (I210, MSI-X). They are kept as
+> the reference the new NIC has to beat. Re-measure with
+> `sudo scripts/benchmark-rt.sh --label i210 --runs 5` and compare against a
+> re-collected `eno1` label if you still have the hardware cabled.
+
+Pooled over 5 runs / 89,995 cycles with all tuning of the time active, 500 µs budget:
 
 | metric | value | % of cycle |
 |---|---|---|
@@ -275,7 +299,7 @@ Pooled over 5 runs / 89,995 cycles with all tuning above active, 500 µs budget:
 | `cycle_jitter_us` spread (p0.1–p99.9) | 112.5 µs | |
 | missed deadlines / faults | **0** | |
 
-Zero frame loss over the same runs (`ethtool -S eno1` shows `rx_packets == tx_packets`,
+Zero frame loss over the same runs (`ethtool -S eno1` showed `rx_packets == tx_packets`,
 all error counters zero).
 
 ### System-level baseline
@@ -288,9 +312,10 @@ sudo cyclictest -m -p 99 -i 500 -a 1 -t 1 -D 60
 
 ## Tried and rejected
 
-**Raising the NIC IRQ thread's RT priority — no effect.** The `irq/<N>-eno1` thread runs
-`SCHED_FIFO` at the default priority 50, the same as `irq/34-i915` and `irq/26-xhci_hcd`,
-which share core 0 with it. Raising it above them looked like an obvious win:
+**Raising the NIC IRQ thread's RT priority — no effect** (measured on `eno1`; not re-tested
+on `enp2s0`). The `irq/<N>-eno1` thread ran `SCHED_FIFO` at the default priority 50, the
+same as `irq/34-i915` and `irq/26-xhci_hcd`, which shared core 0 with it. Raising it above
+them looked like an obvious win:
 
 ```bash
 # NB: pgrep -f self-matches the calling shell; match on the thread name instead
@@ -305,7 +330,14 @@ single baseline run. **Do not re-apply this, and do not trust single-run compari
 The negative result is also evidence: if the spikes below were host-side contention between
 these handlers, priority would have moved them.
 
+The *method* generalises even though the measurement does not: do not trust a single-run
+comparison, whatever the hardware.
+
 ## Open: the ~100 ms periodic interferer
+
+Observed on `eno1`; **not yet re-checked on `enp2s0`**. Re-running the two experiments below
+on the new NIC is now the cheapest next step — if the interferer disappears with the NIC
+change, it was host-side after all and the phase argument below is wrong.
 
 The residual tail is not random. In every run, cycles with `pdo_exchange_us` above ~150 µs
 arrive at gaps that are near-exact multiples of **100 ms**, at a phase that is stable within

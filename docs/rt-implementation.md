@@ -99,7 +99,7 @@ Now cycle 0 is measured against `start + CYCLE_TIME_MS` like all other cycles, a
 
 ```bash
 cmake --build build
-sudo ./ethercat-voice-coil-controller eno1
+sudo ./ethercat-voice-coil-controller enp2s0
 tail -1 data/voice_coil_log_*.csv
 # Check: missed deadlines: 0; cycle_jitter_us all negative with margin;
 #        pdo_exchange_us small and stable (a spike here = bus/slave, not the loop)
