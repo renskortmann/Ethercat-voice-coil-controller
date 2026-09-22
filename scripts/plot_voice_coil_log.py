@@ -63,10 +63,10 @@ AXES = [
     ),
 ]
 
-# ai2_g is derived from ai2_value (accelerometer, 0.0065 V/g) rather than read
+# ai2_g is derived from ai2_value (accelerometer, 0.0578 V/g) rather than read
 # from a column of its own.
-AI2_G_SCALE = 153.8 
-AI2_G_OFFSET = -100 
+AI2_G_SCALE = -17.29 
+AI2_G_OFFSET = 16.68 
 
 # Cut-off of the first-order low-pass applied to ai2_g to give ai2_g_lp.
 AI2_G_LP_CUTOFF_HZ = 20.0
