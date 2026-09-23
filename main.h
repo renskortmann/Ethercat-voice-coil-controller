@@ -27,7 +27,7 @@
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
-#define RUN_DURATION_S      10.0 /**< Total runtime in seconds */
+#define RUN_DURATION_S      120.0 /**< Total runtime in seconds */
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
 
 /** \brief Experiment selection (compile-time). Only the per-cycle setpoint changes between
@@ -35,17 +35,16 @@
 #define EXPERIMENT_SINE          0   /**< Feedforward sine current (SINE_FREQ_HZ, SINE_AMPLITUDE_A) */
 #define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
 #define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
-#define EXPERIMENT_MODE          EXPERIMENT_CHIRP /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+#define EXPERIMENT_MODE          EXPERIMENT_STEP_RELEASE /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
 #define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
 #define SINE_AMPLITUDE_A    5.0  /**< Target current waveform amplitude in Amps */
 
 /** \brief Step-release experiment parameters (EXPERIMENT_STEP_RELEASE) */
-#define HOLD_CURRENT_A      6.0  /**< Constant current during the hold phase, in Amps (sign = direction) */
+#define HOLD_CURRENT_A      3.0  /**< Constant current during the hold phase, in Amps (sign = direction) */
 #define HOLD_RAMP_S         0.2  /**< Linear ramp 0 -> HOLD_CURRENT_A at the start of the hold; 0 for a hard step */
-#define HOLD_DURATION_S     3.0  /**< Time from loop start to release, in seconds (includes the ramp) */
-
+#define HOLD_DURATION_S     10.0  /**< Time from loop start to release, in seconds (includes the ramp) */
 #if EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
 /* Integer casts because a static assertion needs an integer constant expression; ms resolution. */
 _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
@@ -58,8 +57,7 @@ _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
 #define CHIRP_AMPLITUDE_A   3.0   /**< Current amplitude in Amps */
 #define CHIRP_F0_HZ         1.0   /**< Start frequency in Hz (> 0) */
 #define CHIRP_F1_HZ         60.0 /**< End frequency in Hz */
-#define CHIRP_DURATION_S    30.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
-
+#define CHIRP_DURATION_S    120.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
 #if EXPERIMENT_MODE == EXPERIMENT_CHIRP
 _Static_assert((int)(CHIRP_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),
                "CHIRP_DURATION_S must not exceed RUN_DURATION_S");
@@ -121,6 +119,16 @@ _Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
                                    // volts = raw / DAI_SCALE  (AMC EtherCAT Comm Manual MNCMECRF-07, Appendix A Table A.1)
 #define PBV_SCALE          10.0    // Power Board Voltage units (20D8h): volts = raw / PBV_SCALE
 #define DV1_BASE           16384.0 // 2^14, numerator of DV1 (DC Bus Voltage) scaling factor 2^14/(1.05*K_OV)
+
+// AI1 laser distance sensor (ILD1220-50, 4-20 mA into PAI-1 via ~476 ohm effective shunt).
+//   distance_mm = AI1_MM_SCALE * volts + AI1_MM_OFFSET
+//     one-point cal (4.4 V = 51.4 mm) + factory 4 mA = 35 mm; refit from two known distances if a second point disagrees.
+//   position_mm = AI1_POSITION_SIGN * (distance_mm - AI1_CENTRE_MM), 0 = shaft at rest (centred).
+// The plot script keeps a copy of these for logs written before position_mm was added; keep them in sync.
+#define AI1_MM_SCALE       6.568
+#define AI1_MM_OFFSET      22.5
+#define AI1_CENTRE_MM      51.7    // Laser distance with the shaft at rest
+#define AI1_POSITION_SIGN  -1.0    // -1
 
 // PDO object indices for CiA402 current control
 #define ACTUAL_CURRENT_INDEX           0x6077    // Actual current (DC1) in 16-bit signed integer format
@@ -221,6 +229,7 @@ typedef struct
    double energy_J;          /**< Cumulative energy delivered to the motor up to and including this sample */
    double cycle_jitter_us;   /**< Signed offset between actual and scheduled cycle time (positive = late) */
    double pdo_exchange_us;   /**< Time spent in ecx_send_processdata + ecx_receive_processdata (frame round-trip) */
+   double position_mm;       /**< Shaft displacement from centre in mm, derived from ai1_value_V (AI1_* calibration); last CSV column */
 } sample_log_entry_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */

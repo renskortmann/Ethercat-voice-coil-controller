@@ -7,8 +7,9 @@
 /** \brief Record one timestamped sample to the in-memory sample buffer
  *  Converts currents from raw values to physical Amps using KP scaling, the analog input
  *  values (201Ah) from raw DAI units to physical Volts using DAI_SCALE (2^14/20), and the DC
- *  bus voltage (200Fh.01h) from raw DV1 units to physical Volts using KOV. Also computes
- *  bus-referred instantaneous power and integrates cumulative energy delivered to the motor.
+ *  bus voltage (200Fh.01h) from raw DV1 units to physical Volts using KOV. The AI1 laser voltage
+ *  is further converted to a signed shaft displacement in mm (AI1_* calibration in main.h). Also
+ *  computes bus-referred instantaneous power and integrates cumulative energy delivered to the motor.
  *  \param fieldbus Fieldbus context (buffer and count updated)
  *  \param timestamp_s Absolute time in seconds
  *  \param tx Pointer to received TxPDO data
@@ -31,6 +32,8 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
       // DAI units (Appendix A, Table A.1): volts = raw / (2^14 / 20) = raw / DAI_SCALE
       double ai1_value_V = tx->ai1_value / DAI_SCALE;
       double ai2_value_V = tx->ai2_value / DAI_SCALE;
+      /* Laser distance (mm) from the AI1 voltage, re-referenced to the rest position (see main.h). */
+      double position_mm = AI1_POSITION_SIGN * (AI1_MM_SCALE * ai1_value_V + AI1_MM_OFFSET - AI1_CENTRE_MM);
       /* DV1 units (Appendix A, Table A.1): volts = raw * 1.05 * K_OV / 2^14 */
       double dc_bus_voltage_V = tx->dc_bus_voltage_raw * 1.05 * fieldbus->kov_volts / DV1_BASE;
 
@@ -59,6 +62,7 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
       fieldbus->samples[fieldbus->sample_count].energy_J = fieldbus->cumulative_energy_J;
       fieldbus->samples[fieldbus->sample_count].cycle_jitter_us = cycle_jitter_us;
       fieldbus->samples[fieldbus->sample_count].pdo_exchange_us = pdo_exchange_us;
+      fieldbus->samples[fieldbus->sample_count].position_mm = position_mm;
       fieldbus->sample_count++;
    }
 }
@@ -90,7 +94,9 @@ log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
 /** \brief Write sample and fault buffers to CSV files in CSV_DIR, and print fault events
  *  File names carry the compile-time experiment tag (EXPERIMENT_TAG: mode + parameters) followed
  *  by a wall-clock timestamp, so a directory listing shows what each run was. Creates two files:
- *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ...)
+ *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ..., position_mm)
+ *      position_mm is deliberately the last column: scripts/benchmark-rt.sh reads cycle_jitter_us and
+ *      pdo_exchange_us by column number (10 and 11), so new columns must be appended, not inserted.
  *    - voice_coil_faults_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: fault events (timestamp, type, detail, action)
  *  e.g. voice_coil_log_step_release_hold6.0A_ramp0.2s_dur3.0s_20260923_131834.csv
  *  Also prints each fault event to console (deferred from log_fault(), which cannot block on I/O
@@ -118,10 +124,10 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f,%.4f\n",
                  fieldbus->samples[i].timestamp_s,
                  fieldbus->samples[i].actual_current_A,
                  fieldbus->samples[i].target_current_A,
@@ -132,7 +138,8 @@ export_csv(Fieldbus *fieldbus)
                  fieldbus->samples[i].power_W,
                  fieldbus->samples[i].energy_J,
                  fieldbus->samples[i].cycle_jitter_us,
-                 fieldbus->samples[i].pdo_exchange_us);
+                 fieldbus->samples[i].pdo_exchange_us,
+                 fieldbus->samples[i].position_mm);
       }
       fclose(fp);
       printf("Wrote %d samples to %s\n", fieldbus->sample_count, sample_file);

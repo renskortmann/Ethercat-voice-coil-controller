@@ -57,7 +57,8 @@ Run with no arguments to list available network interfaces. Output CSVs are writ
 to `data/`:
 
 - `voice_coil_log_<experiment>_YYYYMMDD_HHMMSS.csv` — per-cycle samples (currents, analog inputs,
-  `cycle_jitter_us`, `pdo_exchange_us`)
+  `cycle_jitter_us`, `pdo_exchange_us`, and `position_mm`: shaft displacement from centre computed
+  in the firmware from the AI1 laser voltage using the `AI1_*` calibration constants in `main.h`)
 - `voice_coil_faults_<experiment>_YYYYMMDD_HHMMSS.csv` — fault events with recovery action
 
 `<experiment>` is the compile-time experiment mode and its parameters (`EXPERIMENT_TAG` in
