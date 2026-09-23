@@ -34,7 +34,8 @@
  *  experiments; scaling, PDO exchange, fault checks, timing and logging are shared. */
 #define EXPERIMENT_SINE          0   /**< Feedforward sine current (SINE_FREQ_HZ, SINE_AMPLITUDE_A) */
 #define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
-#define EXPERIMENT_MODE          EXPERIMENT_STEP_RELEASE /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+#define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
+#define EXPERIMENT_MODE          EXPERIMENT_CHIRP /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
 #define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
@@ -51,6 +52,24 @@ _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
                "HOLD_DURATION_S must be shorter than RUN_DURATION_S, otherwise the release never happens");
 #endif
 
+/** \brief Chirp experiment parameters (EXPERIMENT_CHIRP). Instantaneous frequency is
+ *  f(t) = CHIRP_F0_HZ * (CHIRP_F1_HZ / CHIRP_F0_HZ)^(t / CHIRP_DURATION_S), so every decade
+ *  gets the same sweep time. After CHIRP_DURATION_S the current is 0 A for the rest of the run. */
+#define CHIRP_AMPLITUDE_A   3.0   /**< Current amplitude in Amps */
+#define CHIRP_F0_HZ         1.0   /**< Start frequency in Hz (> 0) */
+#define CHIRP_F1_HZ         60.0 /**< End frequency in Hz */
+#define CHIRP_DURATION_S    30.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
+
+#if EXPERIMENT_MODE == EXPERIMENT_CHIRP
+_Static_assert((int)(CHIRP_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),
+               "CHIRP_DURATION_S must not exceed RUN_DURATION_S");
+_Static_assert((int)(CHIRP_F0_HZ * 1000) > 0 && (int)(CHIRP_F0_HZ * 1000) != (int)(CHIRP_F1_HZ * 1000),
+               "CHIRP_F0_HZ must be > 0 and differ from CHIRP_F1_HZ (the sweep rate divides by ln(f1/f0))");
+/* 10 samples per period at the highest frequency: CHIRP_F1_HZ <= 200 Hz at a 0.5 ms cycle. */
+_Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
+               "CHIRP_F1_HZ too high for CYCLE_TIME_MS: fewer than 10 samples per period");
+#endif
+
 /** \brief Stringize a macro's expanded value (two levels so the argument is expanded first) */
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x)  STRINGIFY_(x)
@@ -63,6 +82,9 @@ _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
 #elif EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
 #define EXPERIMENT_TAG "step_release_hold" STRINGIFY(HOLD_CURRENT_A) "A_ramp" STRINGIFY(HOLD_RAMP_S) \
                        "s_dur" STRINGIFY(HOLD_DURATION_S) "s"
+#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
+#define EXPERIMENT_TAG "chirp_" STRINGIFY(CHIRP_AMPLITUDE_A) "A_" STRINGIFY(CHIRP_F0_HZ) "to" \
+                       STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
 #else
 #error "Unknown EXPERIMENT_MODE"
 #endif

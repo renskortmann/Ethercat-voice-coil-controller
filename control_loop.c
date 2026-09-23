@@ -52,6 +52,14 @@ experiment_target_current_A(double elapsed_s)
       return HOLD_CURRENT_A * (elapsed_s / HOLD_RAMP_S);     /* ramp in */
    }
    return HOLD_CURRENT_A;                                    /* hold */
+#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
+   if (elapsed_s >= CHIRP_DURATION_S)
+   {
+      return 0.0;                                            /* sweep done: ring-down */
+   }
+   /* Phase is the integral of f(t) = f0 * exp(t / L), with L = T / ln(f1 / f0). */
+   const double L = CHIRP_DURATION_S / log(CHIRP_F1_HZ / CHIRP_F0_HZ);
+   return CHIRP_AMPLITUDE_A * sin(2.0 * M_PI * CHIRP_F0_HZ * L * (exp(elapsed_s / L) - 1.0));
 #else
 #error "Unknown EXPERIMENT_MODE"
 #endif
@@ -101,6 +109,9 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 #elif EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
    printf("\nExperiment: step-release, hold %.2f A (ramp %.2f s) until t = %.2f s, then release to 0 A\n",
           HOLD_CURRENT_A, HOLD_RAMP_S, HOLD_DURATION_S);
+#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
+   printf("\nExperiment: exponential chirp, %.2f A, %.2f -> %.2f Hz over %.2f s, then 0 A\n",
+          CHIRP_AMPLITUDE_A, CHIRP_F0_HZ, CHIRP_F1_HZ, CHIRP_DURATION_S);
 #endif
    printf("Starting %.0f-second cyclic loop... expected WKC: %d\n", RUN_DURATION_S, expected_wkc);
 
