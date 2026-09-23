@@ -5,7 +5,7 @@ Reads the most recent ``data/voice_coil_log_*.csv`` file and draws stacked
 axes sharing the time axis:
 
 * current (A)  -- actual / target / demand current (left axis) and bus voltage (right axis), with show/hide checkboxes
-* ai1_value (V)
+* displacement from centre (mm)  -- laser distance derived from ai1_value, 0 = shaft centred
 * ai2_g (g)  -- accelerometer g-force derived from ai2_value, raw and
   low-pass filtered
 * power (W) / energy (J) -- bus-referred instantaneous power (left axis) and
@@ -44,9 +44,9 @@ AXES = [
         },
     ),
     (
-        "ai1_value (V)",
+        "x (mm)",
         False,
-        {"ai1_value": (("ai1_value_V", "ai1_value"), "tab:brown")},
+        {"ai1_mm": (None, "tab:brown")},
     ),
     (
         "ai2_g (g)",
@@ -68,11 +68,23 @@ AXES = [
 AI2_G_SCALE = -17.29 
 AI2_G_OFFSET = 16.68 
 
+# ai1_mm is the laser distance (ILD1220-50, 4-20 mA into PAI-1 via ~476 ohm
+# effective shunt) derived from ai1_value: d [mm] = scale * V + offset.
+# ponytail: one-point cal (4.4 V = 51.4 mm) + factory 4 mA = 35 mm; refit from
+# two known distances if a second point disagrees.
+AI1_MM_SCALE = 6.568
+AI1_MM_OFFSET = 22.5
+# Distance with the shaft at rest (centred); plotted displacement is relative to it.
+AI1_CENTRE_MM = 51.4
+
 # Cut-off of the first-order low-pass applied to ai2_g to give ai2_g_lp.
 AI2_G_LP_CUTOFF_HZ = 20.0
 
-# Read from the log but not plotted directly (ai2_g is derived from it).
-RAW_SIGNALS = {"ai2_value": (("ai2_value_V", "ai2_value"), None)}
+# Read from the log but not plotted directly (ai1_mm / ai2_g are derived from them).
+RAW_SIGNALS = {
+    "ai1_value": (("ai1_value_V", "ai1_value"), None),
+    "ai2_value": (("ai2_value_V", "ai2_value"), None),
+}
 
 # Plotted on a twin y-axis of the "power (W)" axis (cumulative, different scale/units).
 ENERGY_SIGNAL = {"energy": ("energy_J", "tab:purple")}
@@ -211,6 +223,7 @@ def main() -> None:
     if not time_s:
         sys.exit(f"no usable rows in {path}")
 
+    series["ai1_mm"] = [AI1_MM_SCALE * v + AI1_MM_OFFSET - AI1_CENTRE_MM for v in series["ai1_value"]]
     series["ai2_g"] = [AI2_G_SCALE * v + AI2_G_OFFSET for v in series["ai2_value"]]
 
     series["ai2_g_lp"] = low_pass(time_s, series["ai2_g"], AI2_G_LP_CUTOFF_HZ)
@@ -224,7 +237,7 @@ def main() -> None:
     print(f"Average power: {avg_power_W:.2f} W")
     print(f"Average RMS power: {avg_rms_power_W:.2f} W")
     print(f"Total energy delivered: {total_energy_J:.2f} J")
-    print(f"Average AI1 value: {avg_ai1_value_V:.4f} V")
+    print(f"Average AI1 value: {avg_ai1_value_V:.4f} V ({AI1_MM_SCALE * avg_ai1_value_V + AI1_MM_OFFSET - AI1_CENTRE_MM:+.2f} mm from centre)")
     print(f"Average AI2 value: {avg_ai2_value_V:.4f} V")
     print(f"Average AI2 g-force: {avg_ai2_g:.2f} g")
 
