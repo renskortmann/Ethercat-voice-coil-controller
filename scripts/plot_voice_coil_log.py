@@ -44,7 +44,7 @@ AXES = [
         },
     ),
     (
-        "displacement from centre (mm)",
+        "x (mm)",
         False,
         {"ai1_mm": (None, "tab:brown")},
     ),
@@ -74,8 +74,8 @@ AI2_G_OFFSET = 16.68
 # two known distances if a second point disagrees.
 AI1_MM_SCALE = 6.568
 AI1_MM_OFFSET = 22.5
-# Sensor reading with the shaft centred; plotted displacement is relative to it.
-AI1_CENTRE_MM = 22.5
+# Distance with the shaft at rest (centred); plotted displacement is relative to it.
+AI1_CENTRE_MM = 51.4
 
 # Cut-off of the first-order low-pass applied to ai2_g to give ai2_g_lp.
 AI2_G_LP_CUTOFF_HZ = 20.0
