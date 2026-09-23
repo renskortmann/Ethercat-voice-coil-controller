@@ -34,7 +34,8 @@
  *  experiments; scaling, PDO exchange, fault checks, timing and logging are shared. */
 #define EXPERIMENT_SINE          0   /**< Feedforward sine current (SINE_FREQ_HZ, SINE_AMPLITUDE_A) */
 #define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
-#define EXPERIMENT_MODE          EXPERIMENT_STEP_RELEASE
+#define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
+#define EXPERIMENT_MODE          EXPERIMENT_CHIRP
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
 #define SINE_FREQ_HZ        10.0 /**< Target current waveform frequency in Hz */
@@ -49,6 +50,24 @@
 /* Integer casts because a static assertion needs an integer constant expression; ms resolution. */
 _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
                "HOLD_DURATION_S must be shorter than RUN_DURATION_S, otherwise the release never happens");
+#endif
+
+/** \brief Chirp experiment parameters (EXPERIMENT_CHIRP). Instantaneous frequency is
+ *  f(t) = CHIRP_F0_HZ * (CHIRP_F1_HZ / CHIRP_F0_HZ)^(t / CHIRP_DURATION_S), so every decade
+ *  gets the same sweep time. After CHIRP_DURATION_S the current is 0 A for the rest of the run. */
+#define CHIRP_AMPLITUDE_A   3.0   /**< Current amplitude in Amps */
+#define CHIRP_F0_HZ         1.0   /**< Start frequency in Hz (> 0) */
+#define CHIRP_F1_HZ         60.0 /**< End frequency in Hz */
+#define CHIRP_DURATION_S    30.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
+
+#if EXPERIMENT_MODE == EXPERIMENT_CHIRP
+_Static_assert((int)(CHIRP_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),
+               "CHIRP_DURATION_S must not exceed RUN_DURATION_S");
+_Static_assert((int)(CHIRP_F0_HZ * 1000) > 0 && (int)(CHIRP_F0_HZ * 1000) != (int)(CHIRP_F1_HZ * 1000),
+               "CHIRP_F0_HZ must be > 0 and differ from CHIRP_F1_HZ (the sweep rate divides by ln(f1/f0))");
+/* 10 samples per period at the highest frequency: CHIRP_F1_HZ <= 200 Hz at a 0.5 ms cycle. */
+_Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
+               "CHIRP_F1_HZ too high for CYCLE_TIME_MS: fewer than 10 samples per period");
 #endif
 
 #define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
