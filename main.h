@@ -31,6 +31,24 @@
 #define SINE_AMPLITUDE_A    2.0  /**< Target current waveform amplitude in Amps */
 #define RUN_DURATION_S      10.0 /**< Total runtime in seconds */
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
+
+/** \brief Experiment selection (compile-time). Only the per-cycle setpoint changes between
+ *  experiments; scaling, PDO exchange, fault checks, timing and logging are shared. */
+#define EXPERIMENT_SINE          0   /**< Feedforward sine current (SINE_FREQ_HZ, SINE_AMPLITUDE_A) */
+#define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
+#define EXPERIMENT_MODE          EXPERIMENT_STEP_RELEASE
+
+/** \brief Step-release experiment parameters (EXPERIMENT_STEP_RELEASE) */
+#define HOLD_CURRENT_A      1.0  /**< Constant current during the hold phase, in Amps (sign = direction) */
+#define HOLD_RAMP_S         0.2  /**< Linear ramp 0 -> HOLD_CURRENT_A at the start of the hold; 0 for a hard step */
+#define HOLD_DURATION_S     3.0  /**< Time from loop start to release, in seconds (includes the ramp) */
+
+#if EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
+/* Integer casts because a static assertion needs an integer constant expression; ms resolution. */
+_Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
+               "HOLD_DURATION_S must be shorter than RUN_DURATION_S, otherwise the release never happens");
+#endif
+
 #define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000
 

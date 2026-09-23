@@ -16,7 +16,8 @@ and logs every cycle to CSV for offline analysis.
 3. Walks the CiA 402 state machine to **Operation Enabled**.
 4. Enters real-time mode (memory locked, pinned to an isolated core, `SCHED_FIFO`)
    and runs the DC-SYNC0-synchronized cyclic loop:
-   - generates a sine-wave target current (`SINE_FREQ_HZ`, `SINE_AMPLITUDE_A`)
+   - generates the target current for the selected experiment (`EXPERIMENT_MODE`): a
+     sine wave, or a step-release (hold a constant current, then release to zero)
    - exchanges process data every `CYCLE_TIME_MS`
    - validates the working counter and the drive state every cycle
    - records per-cycle timing jitter and PDO round-trip time
@@ -66,10 +67,24 @@ Runtime parameters are compile-time constants in [main.h](main.h):
 | Constant | Default | Meaning |
 |---|---|---|
 | `CYCLE_TIME_MS` | 0.5 | EtherCAT cycle period |
-| `SINE_FREQ_HZ` | 10.0 | Target current waveform frequency |
-| `SINE_AMPLITUDE_A` | 2.0 | Target current waveform amplitude |
-| `RUN_DURATION_S` | 30.0 | Total run time |
+| `RUN_DURATION_S` | 10.0 | Total run time |
+| `EXPERIMENT_MODE` | `EXPERIMENT_STEP_RELEASE` | Which setpoint profile the loop commands (see below) |
+| `SINE_FREQ_HZ` | 10.0 | Sine experiment: target current waveform frequency |
+| `SINE_AMPLITUDE_A` | 2.0 | Sine experiment: target current waveform amplitude |
+| `HOLD_CURRENT_A` | 1.0 | Step-release experiment: constant current during the hold phase |
+| `HOLD_RAMP_S` | 0.2 | Step-release experiment: linear ramp-in time at the start of the hold (0 = hard step) |
+| `HOLD_DURATION_S` | 3.0 | Step-release experiment: time from loop start to release (must be < `RUN_DURATION_S`) |
 | `RT_CPU_CORE` | 1 | Isolated core for the cyclic loop |
+
+Two experiments are available, selected at compile time with `EXPERIMENT_MODE`:
+
+- `EXPERIMENT_SINE` — feedforward sine current at `SINE_FREQ_HZ` / `SINE_AMPLITUDE_A`.
+- `EXPERIMENT_STEP_RELEASE` — ramp to `HOLD_CURRENT_A` over `HOLD_RAMP_S`, hold it so the
+  coil settles at a fixed deflection, then at `HOLD_DURATION_S` command zero current and record
+  the free (autonomous) mechanical response on the accelerometer input for the rest of the run.
+  The drive stays in Operation Enabled and regulates coil current to zero, so no motor force
+  acts during the ring-down. The release instant is `HOLD_DURATION_S` in the CSV `timestamp_s`
+  column.
 
 ## Real-time setup
 

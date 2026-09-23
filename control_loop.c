@@ -1,5 +1,5 @@
 /** \file control_loop.c
- * \brief Real-time cyclic loop: sine-wave generation, PDO exchange, fault monitoring, timing
+ * \brief Real-time cyclic loop: experiment setpoint generation, PDO exchange, fault monitoring, timing
  */
 
 #include "main.h"
@@ -31,7 +31,33 @@ timespec_diff_us(const struct timespec *end, const struct timespec *start)
           (double)(end->tv_nsec - start->tv_nsec) / 1000.0;
 }
 
-/** \brief Run the real-time control loop: generate sine-wave commands, exchange PDO, monitor faults
+/** \brief Target current for this cycle, in Amps, for the experiment selected by EXPERIMENT_MODE
+ *  This is the only experiment-specific code in the cyclic loop. It must stay cheap and
+ *  allocation-free: it runs once per cycle inside the real-time loop.
+ *  \param elapsed_s Elapsed loop time in seconds (cycle_count * cycle time)
+ *  \return Target current in Amps (converted to raw drive units by the caller)
+ */
+static double
+experiment_target_current_A(double elapsed_s)
+{
+#if EXPERIMENT_MODE == EXPERIMENT_SINE
+   return SINE_AMPLITUDE_A * sin(2.0 * M_PI * SINE_FREQ_HZ * elapsed_s);
+#elif EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
+   if (elapsed_s >= HOLD_DURATION_S)
+   {
+      return 0.0;                                            /* released: free response */
+   }
+   if (HOLD_RAMP_S > 0.0 && elapsed_s < HOLD_RAMP_S)
+   {
+      return HOLD_CURRENT_A * (elapsed_s / HOLD_RAMP_S);     /* ramp in */
+   }
+   return HOLD_CURRENT_A;                                    /* hold */
+#else
+#error "Unknown EXPERIMENT_MODE"
+#endif
+}
+
+/** \brief Run the real-time control loop: generate experiment setpoints, exchange PDO, monitor faults
  *  Operates for RUN_DURATION_S seconds at CYCLE_TIME_MS intervals, synchronized via DC SYNC0.
  *  Detects WKC errors and CiA402 state drift; logs samples and faults to in-memory buffers.
  *
@@ -54,7 +80,6 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    struct timespec next_cycle, now, pdo_start, pdo_end;
    int64_t cycle_ns = (int64_t)(CYCLE_TIME_MS * 1000000);
    double elapsed_s = 0.0;
-   double sine_phase;
    double target_current_A;
    int32_t target_current_raw;
    double cycle_jitter_us;
@@ -71,7 +96,13 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    int missed_deadline_count = 0;
    double max_jitter_us = 0.0;
 
-   printf("\nStarting %.0f-second cyclic loop... expected WKC: %d\n", RUN_DURATION_S, expected_wkc);
+#if EXPERIMENT_MODE == EXPERIMENT_SINE
+   printf("\nExperiment: sine, %.1f Hz, %.2f A amplitude\n", SINE_FREQ_HZ, SINE_AMPLITUDE_A);
+#elif EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
+   printf("\nExperiment: step-release, hold %.2f A (ramp %.2f s) until t = %.2f s, then release to 0 A\n",
+          HOLD_CURRENT_A, HOLD_RAMP_S, HOLD_DURATION_S);
+#endif
+   printf("Starting %.0f-second cyclic loop... expected WKC: %d\n", RUN_DURATION_S, expected_wkc);
 
    /* SYNC0 stays off: this loop paces itself from CLOCK_MONOTONIC and never phase-locks to the
     * slave's DC clock, so with SYNC0 enabled the frame-arrival phase walks at the two oscillators'
@@ -87,9 +118,8 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 
    while (elapsed_s < RUN_DURATION_S)
    {
-      /* Compute target current (sine wave) */
-      sine_phase = 2.0 * M_PI * SINE_FREQ_HZ * elapsed_s;
-      target_current_A = SINE_AMPLITUDE_A * sin(sine_phase);
+      /* Compute target current for the selected experiment */
+      target_current_A = experiment_target_current_A(elapsed_s);
 
       /* Convert to raw Int32 (scale: 2^15 / KP) */
       target_current_raw = (int32_t)round((target_current_A * DC2_SCALE) / fieldbus->kp_amps);
