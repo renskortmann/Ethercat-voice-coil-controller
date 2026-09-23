@@ -35,7 +35,8 @@
 #define EXPERIMENT_SINE          0   /**< Feedforward sine current (SINE_FREQ_HZ, SINE_AMPLITUDE_A) */
 #define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
 #define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
-#define EXPERIMENT_MODE          EXPERIMENT_STEP_RELEASE /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+#define EXPERIMENT_PRBS          3   /**< Pseudo-random binary current +/-PRBS_AMPLITUDE_A, then 0 A */
+#define EXPERIMENT_MODE          EXPERIMENT_PRBS /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
 #define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
@@ -68,6 +69,22 @@ _Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
                "CHIRP_F1_HZ too high for CYCLE_TIME_MS: fewer than 10 samples per period");
 #endif
 
+/** \brief PRBS experiment parameters (EXPERIMENT_PRBS). A 15-bit maximum-length LFSR
+ *  (period 32767 bits, fixed seed) sets the current to +A or -A, each bit held for
+ *  PRBS_HOLD_CYCLES cycles. The power spectrum follows sinc^2(f * T_bit) and is about 2 dB down
+ *  at 0.4 / T_bit >= PRBS_BANDWIDTH_HZ. After PRBS_DURATION_S the current is 0 A. */
+#define PRBS_AMPLITUDE_A    5.0   /**< Current level in Amps: output is +A or -A */
+#define PRBS_BANDWIDTH_HZ   55.0  /**< Upper frequency of the flat part of the spectrum, in Hz (<= 60) */
+#define PRBS_DURATION_S     120.0 /**< Sequence length in seconds, <= RUN_DURATION_S */
+/** Cycles per PRBS bit: longest hold with 0.4 / T_bit >= PRBS_BANDWIDTH_HZ (13 at 60 Hz, 0.5 ms). */
+#define PRBS_HOLD_CYCLES    ((int)(400.0 / (PRBS_BANDWIDTH_HZ * CYCLE_TIME_MS)))
+#if EXPERIMENT_MODE == EXPERIMENT_PRBS
+_Static_assert((int)(PRBS_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),
+               "PRBS_DURATION_S must not exceed RUN_DURATION_S");
+_Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
+               "PRBS_BANDWIDTH_HZ must not exceed 60 Hz");
+#endif
+
 /** \brief Stringize a macro's expanded value (two levels so the argument is expanded first) */
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x)  STRINGIFY_(x)
@@ -83,6 +100,9 @@ _Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
 #elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
 #define EXPERIMENT_TAG "chirp_" STRINGIFY(CHIRP_AMPLITUDE_A) "A_" STRINGIFY(CHIRP_F0_HZ) "to" \
                        STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
+#elif EXPERIMENT_MODE == EXPERIMENT_PRBS
+#define EXPERIMENT_TAG "prbs_" STRINGIFY(PRBS_AMPLITUDE_A) "A_" STRINGIFY(PRBS_BANDWIDTH_HZ) "Hz_" \
+                       STRINGIFY(PRBS_DURATION_S) "s"
 #else
 #error "Unknown EXPERIMENT_MODE"
 #endif
