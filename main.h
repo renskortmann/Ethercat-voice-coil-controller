@@ -27,8 +27,6 @@
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
-#define SINE_FREQ_HZ        10.0 /**< Target current waveform frequency in Hz */
-#define SINE_AMPLITUDE_A    2.0  /**< Target current waveform amplitude in Amps */
 #define RUN_DURATION_S      10.0 /**< Total runtime in seconds */
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
 
@@ -37,6 +35,10 @@
 #define EXPERIMENT_SINE          0   /**< Feedforward sine current (SINE_FREQ_HZ, SINE_AMPLITUDE_A) */
 #define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
 #define EXPERIMENT_MODE          EXPERIMENT_STEP_RELEASE
+
+/** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
+#define SINE_FREQ_HZ        10.0 /**< Target current waveform frequency in Hz */
+#define SINE_AMPLITUDE_A    2.0  /**< Target current waveform amplitude in Amps */
 
 /** \brief Step-release experiment parameters (EXPERIMENT_STEP_RELEASE) */
 #define HOLD_CURRENT_A      1.0  /**< Constant current during the hold phase, in Amps (sign = direction) */
