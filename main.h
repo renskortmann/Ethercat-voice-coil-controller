@@ -35,16 +35,16 @@
 #define EXPERIMENT_SINE          0   /**< Feedforward sine current (SINE_FREQ_HZ, SINE_AMPLITUDE_A) */
 #define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
 #define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
-#define EXPERIMENT_MODE          EXPERIMENT_STEP_RELEASE /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+#define EXPERIMENT_MODE          EXPERIMENT_CHIRP /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
 #define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
 #define SINE_AMPLITUDE_A    5.0  /**< Target current waveform amplitude in Amps */
 
 /** \brief Step-release experiment parameters (EXPERIMENT_STEP_RELEASE) */
-#define HOLD_CURRENT_A      3.0  /**< Constant current during the hold phase, in Amps (sign = direction) */
+#define HOLD_CURRENT_A      7.5  /**< Constant current during the hold phase, in Amps (sign = direction) */
 #define HOLD_RAMP_S         0.2  /**< Linear ramp 0 -> HOLD_CURRENT_A at the start of the hold; 0 for a hard step */
-#define HOLD_DURATION_S     10.0  /**< Time from loop start to release, in seconds (includes the ramp) */
+#define HOLD_DURATION_S     20.0  /**< Time from loop start to release, in seconds (includes the ramp) */
 #if EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
 /* Integer casts because a static assertion needs an integer constant expression; ms resolution. */
 _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
@@ -54,9 +54,9 @@ _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
 /** \brief Chirp experiment parameters (EXPERIMENT_CHIRP). Instantaneous frequency is
  *  f(t) = CHIRP_F0_HZ * (CHIRP_F1_HZ / CHIRP_F0_HZ)^(t / CHIRP_DURATION_S), so every decade
  *  gets the same sweep time. After CHIRP_DURATION_S the current is 0 A for the rest of the run. */
-#define CHIRP_AMPLITUDE_A   3.0   /**< Current amplitude in Amps */
+#define CHIRP_AMPLITUDE_A   6.5   /**< Current amplitude in Amps */
 #define CHIRP_F0_HZ         1.0   /**< Start frequency in Hz (> 0) */
-#define CHIRP_F1_HZ         60.0 /**< End frequency in Hz */
+#define CHIRP_F1_HZ         55.0 /**< End frequency in Hz */
 #define CHIRP_DURATION_S    120.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
 #if EXPERIMENT_MODE == EXPERIMENT_CHIRP
 _Static_assert((int)(CHIRP_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),

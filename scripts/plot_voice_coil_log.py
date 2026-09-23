@@ -85,14 +85,14 @@ AI1_MM_SCALE = 6.568
 AI1_MM_OFFSET = 22.5
 # Distance with the shaft at rest (centred); plotted displacement is relative to it.
 AI1_CENTRE_MM = 51.7
-# -1: positive displacement = shaft moving towards the laser (distance shrinking).
+# -1: positive displacement = shaft moving to the right from the perspective of the lab PC.
 AI1_POSITION_SIGN = -1.0
 
 # Cut-off of the first-order low-pass applied to ai2_g to give ai2_g_lp.
-AI2_G_LP_CUTOFF_HZ = 20.0
+AI2_G_LP_CUTOFF_HZ = 50.0
 
 # Cut-off of the first-order low-pass applied to ai1_mm to give ai1_mm_lp.
-AI1_MM_LP_CUTOFF_HZ = 20.0
+AI1_MM_LP_CUTOFF_HZ = 50.0
 
 # Read from the log but not plotted directly (ai1_mm / ai2_g are derived from them).
 # position_mm is absent from older logs; read_log() then yields NaN for every row
