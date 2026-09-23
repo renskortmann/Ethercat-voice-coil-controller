@@ -5,7 +5,8 @@ Reads the most recent ``data/voice_coil_log_*.csv`` file and draws stacked
 axes sharing the time axis:
 
 * current (A)  -- actual / target / demand current (left axis) and bus voltage (right axis), with show/hide checkboxes
-* displacement from centre (mm)  -- laser distance derived from ai1_value, 0 = shaft centred
+* displacement from centre (mm)  -- laser distance derived from ai1_value,
+  0 = shaft centred, raw and low-pass filtered
 * ai2_g (g)  -- accelerometer g-force derived from ai2_value, raw and
   low-pass filtered
 * power (W) / energy (J) -- bus-referred instantaneous power (left axis) and
@@ -14,7 +15,10 @@ axes sharing the time axis:
 Usage:
     python scripts/plot_voice_coil_log.py [path/to/log.csv]
 
-With no argument the newest log in ``data/`` is used.
+With no argument the newest log in ``data/`` is used. Log names carry the
+experiment mode and parameters between the prefix and the timestamp (e.g.
+``voice_coil_log_sine_15.0Hz_5.0A_20260923_132459.csv``); the glob above
+matches them regardless, and the full name is used as the figure title.
 """
 
 from __future__ import annotations
@@ -46,7 +50,10 @@ AXES = [
     (
         "x (mm)",
         False,
-        {"ai1_mm": (None, "tab:brown")},
+        {
+            "ai1_mm": (None, "tab:brown"),
+            "ai1_mm_lp": (None, "black"),
+        },
     ),
     (
         "ai2_g (g)",
@@ -66,7 +73,7 @@ AXES = [
 # ai2_g is derived from ai2_value (accelerometer, 0.0578 V/g) rather than read
 # from a column of its own.
 AI2_G_SCALE = -17.29 
-AI2_G_OFFSET = 16.68 
+AI2_G_OFFSET = 13.18 
 
 # ai1_mm is the laser distance (ILD1220-50, 4-20 mA into PAI-1 via ~476 ohm
 # effective shunt) derived from ai1_value: d [mm] = scale * V + offset.
@@ -75,10 +82,13 @@ AI2_G_OFFSET = 16.68
 AI1_MM_SCALE = 6.568
 AI1_MM_OFFSET = 22.5
 # Distance with the shaft at rest (centred); plotted displacement is relative to it.
-AI1_CENTRE_MM = 51.4
+AI1_CENTRE_MM = 51.7
 
 # Cut-off of the first-order low-pass applied to ai2_g to give ai2_g_lp.
 AI2_G_LP_CUTOFF_HZ = 20.0
+
+# Cut-off of the first-order low-pass applied to ai1_mm to give ai1_mm_lp.
+AI1_MM_LP_CUTOFF_HZ = 20.0
 
 # Read from the log but not plotted directly (ai1_mm / ai2_g are derived from them).
 RAW_SIGNALS = {
@@ -226,6 +236,7 @@ def main() -> None:
     series["ai1_mm"] = [AI1_MM_SCALE * v + AI1_MM_OFFSET - AI1_CENTRE_MM for v in series["ai1_value"]]
     series["ai2_g"] = [AI2_G_SCALE * v + AI2_G_OFFSET for v in series["ai2_value"]]
 
+    series["ai1_mm_lp"] = low_pass(time_s, series["ai1_mm"], AI1_MM_LP_CUTOFF_HZ)
     series["ai2_g_lp"] = low_pass(time_s, series["ai2_g"], AI2_G_LP_CUTOFF_HZ)
 
     avg_power_W = time_weighted_mean(time_s, series["power"])

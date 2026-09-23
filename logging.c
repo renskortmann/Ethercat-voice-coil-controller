@@ -87,10 +87,12 @@ log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
    }
 }
 
-/** \brief Write sample and fault buffers to timestamped CSV files in CSV_DIR, and print fault events
- *  Creates two files:
- *    - voice_coil_log_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ...)
- *    - voice_coil_faults_YYYYMMDD_HHMMSS.csv: fault events (timestamp, type, detail, action)
+/** \brief Write sample and fault buffers to CSV files in CSV_DIR, and print fault events
+ *  File names carry the compile-time experiment tag (EXPERIMENT_TAG: mode + parameters) followed
+ *  by a wall-clock timestamp, so a directory listing shows what each run was. Creates two files:
+ *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ...)
+ *    - voice_coil_faults_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: fault events (timestamp, type, detail, action)
+ *  e.g. voice_coil_log_step_release_hold6.0A_ramp0.2s_dur3.0s_20260923_131834.csv
  *  Also prints each fault event to console (deferred from log_fault(), which cannot block on I/O
  *  since it runs inside the real-time cyclic loop).
  *  \param fieldbus Fieldbus context with populated buffers
@@ -112,7 +114,7 @@ export_csv(Fieldbus *fieldbus)
    mkdir(CSV_DIR, 0755);
 
    /* Write sample log */
-   snprintf(sample_file, sizeof(sample_file), "%s/voice_coil_log_%s.csv", CSV_DIR, timestamp);
+   snprintf(sample_file, sizeof(sample_file), "%s/voice_coil_log_%s_%s.csv", CSV_DIR, EXPERIMENT_TAG, timestamp);
    fp = fopen(sample_file, "w");
    if (fp)
    {
@@ -145,7 +147,7 @@ export_csv(Fieldbus *fieldbus)
    const char *fault_names[] = {"WKC_ERROR", "ALstatuscode_CHANGE", "STATE_DRIFT", "DRIVE_STATUS_FLAG"};
    const char *recovery_names[] = {"NONE", "AUTO_RECOVER", "SHUTDOWN_INITIATED"};
 
-   snprintf(fault_file, sizeof(fault_file), "%s/voice_coil_faults_%s.csv", CSV_DIR, timestamp);
+   snprintf(fault_file, sizeof(fault_file), "%s/voice_coil_faults_%s_%s.csv", CSV_DIR, EXPERIMENT_TAG, timestamp);
    fp = fopen(fault_file, "w");
    if (fp)
    {

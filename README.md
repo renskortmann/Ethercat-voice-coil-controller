@@ -56,9 +56,15 @@ sudo ./ethercat-voice-coil-controller <IFNAME>      # e.g. enp2s0
 Run with no arguments to list available network interfaces. Output CSVs are written
 to `data/`:
 
-- `voice_coil_log_YYYYMMDD_HHMMSS.csv` — per-cycle samples (currents, analog inputs,
+- `voice_coil_log_<experiment>_YYYYMMDD_HHMMSS.csv` — per-cycle samples (currents, analog inputs,
   `cycle_jitter_us`, `pdo_exchange_us`)
-- `voice_coil_faults_YYYYMMDD_HHMMSS.csv` — fault events with recovery action
+- `voice_coil_faults_<experiment>_YYYYMMDD_HHMMSS.csv` — fault events with recovery action
+
+`<experiment>` is the compile-time experiment mode and its parameters (`EXPERIMENT_TAG` in
+`main.h`), so a directory listing shows what each run was. Examples:
+
+- `voice_coil_log_sine_15.0Hz_5.0A_20260923_132459.csv`
+- `voice_coil_log_step_release_hold6.0A_ramp0.2s_dur3.0s_20260923_131834.csv`
 
 ## Configuration
 
