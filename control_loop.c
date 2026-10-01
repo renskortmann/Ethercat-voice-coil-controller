@@ -60,6 +60,23 @@ experiment_target_current_A(double elapsed_s)
    /* Phase is the integral of f(t) = f0 * exp(t / L), with L = T / ln(f1 / f0). */
    const double L = CHIRP_DURATION_S / log(CHIRP_F1_HZ / CHIRP_F0_HZ);
    return CHIRP_AMPLITUDE_A * sin(2.0 * M_PI * CHIRP_F0_HZ * L * (exp(elapsed_s / L) - 1.0));
+#elif EXPERIMENT_MODE == EXPERIMENT_PRBS
+   static uint16_t lfsr = 1;      /* 15-bit LFSR state; nonzero seed, fixed so every run repeats */
+   static long bit_index = 0;     /* index of the PRBS bit held in lfsr */
+   if (elapsed_s >= PRBS_DURATION_S)
+   {
+      return 0.0;                                            /* sequence done: ring-down */
+   }
+   /* Cycle index from elapsed time; rounding absorbs floating-point error in elapsed_s. */
+   long target_bit = lround(elapsed_s * 1000.0 / CYCLE_TIME_MS) / PRBS_HOLD_CYCLES;
+   while (bit_index < target_bit)
+   {
+      /* Fibonacci LFSR, polynomial x^15 + x^14 + 1 (maximal length, period 32767) */
+      uint16_t bit = ((lfsr >> 14) ^ (lfsr >> 13)) & 1u;
+      lfsr = (uint16_t)(((lfsr << 1) | bit) & 0x7FFFu);
+      bit_index++;
+   }
+   return (lfsr & 1u) ? PRBS_AMPLITUDE_A : -PRBS_AMPLITUDE_A;
 #else
 #error "Unknown EXPERIMENT_MODE"
 #endif
@@ -112,6 +129,9 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 #elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
    printf("\nExperiment: exponential chirp, %.2f A, %.2f -> %.2f Hz over %.2f s, then 0 A\n",
           CHIRP_AMPLITUDE_A, CHIRP_F0_HZ, CHIRP_F1_HZ, CHIRP_DURATION_S);
+#elif EXPERIMENT_MODE == EXPERIMENT_PRBS
+   printf("\nExperiment: PRBS, +/-%.2f A, bandwidth %.1f Hz (%d cycles per bit) for %.2f s, then 0 A\n",
+          PRBS_AMPLITUDE_A, PRBS_BANDWIDTH_HZ, PRBS_HOLD_CYCLES, PRBS_DURATION_S);
 #endif
    printf("Starting %.0f-second cyclic loop... expected WKC: %d\n", RUN_DURATION_S, expected_wkc);
 
