@@ -12,6 +12,9 @@
 !/data/voice_coil_faults_chirp_6.5A_1.0to55.0Hz_120.0s_20260923_155557.csv
 !/data/voice_coil_log_chirp_6.5A_1.0to55.0Hz_120.0s_20260923_160540.csv
 !/data/voice_coil_faults_chirp_6.5A_1.0to55.0Hz_120.0s_20260923_160540.csv
+# System identification split: test/ and train/ hold copies of whole runs
+!/data/test/
+!/data/train/
 /voice-coil
 /ethercat-voice-coil-controller
 /build
