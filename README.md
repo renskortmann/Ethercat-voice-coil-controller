@@ -67,6 +67,7 @@ to `data/`:
 - `voice_coil_log_sine_15.0Hz_5.0A_20260923_132459.csv`
 - `voice_coil_log_step_release_hold6.0A_ramp0.2s_dur3.0s_20260923_131834.csv`
 - `voice_coil_log_chirp_3.0A_1.0to60.0Hz_30.0s_20260923_140212.csv`
+- `voice_coil_log_prbs_3.0A_60.0Hz_120.0s_20260923_160530.csv`
 
 ## Configuration
 
@@ -76,7 +77,7 @@ Runtime parameters are compile-time constants in [main.h](main.h):
 |---|---|---|
 | `CYCLE_TIME_MS` | 0.5 | EtherCAT cycle period |
 | `RUN_DURATION_S` | 10.0 | Total run time |
-| `EXPERIMENT_MODE` | `EXPERIMENT_CHIRP` | Which setpoint profile the loop commands (see below) |
+| `EXPERIMENT_MODE` | `EXPERIMENT_PRBS` | Which setpoint profile the loop commands (see below) |
 | `SINE_FREQ_HZ` | 10.0 | Sine experiment: target current waveform frequency |
 | `SINE_AMPLITUDE_A` | 2.0 | Sine experiment: target current waveform amplitude |
 | `HOLD_CURRENT_A` | 1.0 | Step-release experiment: constant current during the hold phase |
@@ -86,9 +87,12 @@ Runtime parameters are compile-time constants in [main.h](main.h):
 | `CHIRP_F0_HZ` | 1.0 | Chirp experiment: start frequency (> 0) |
 | `CHIRP_F1_HZ` | 100.0 | Chirp experiment: end frequency (at least 10 samples per period) |
 | `CHIRP_DURATION_S` | 8.0 | Chirp experiment: sweep length (must be <= `RUN_DURATION_S`) |
+| `PRBS_AMPLITUDE_A` | 3.0 | PRBS experiment: current level, output is +A or -A |
+| `PRBS_BANDWIDTH_HZ` | 60.0 | PRBS experiment: upper frequency of the flat spectrum (<= 60 Hz) |
+| `PRBS_DURATION_S` | 120.0 | PRBS experiment: sequence length (must be <= `RUN_DURATION_S`) |
 | `RT_CPU_CORE` | 1 | Isolated core for the cyclic loop |
 
-Three experiments are available, selected at compile time with `EXPERIMENT_MODE`:
+Four experiments are available, selected at compile time with `EXPERIMENT_MODE`:
 
 - `EXPERIMENT_SINE` — feedforward sine current at `SINE_FREQ_HZ` / `SINE_AMPLITUDE_A`.
 - `EXPERIMENT_STEP_RELEASE` — ramp to `HOLD_CURRENT_A` over `HOLD_RAMP_S`, hold it so the
@@ -101,6 +105,11 @@ Three experiments are available, selected at compile time with `EXPERIMENT_MODE`
   `CHIRP_AMPLITUDE_A`, frequency f(t) = f0 · (f1/f0)^(t/T) from `CHIRP_F0_HZ` to `CHIRP_F1_HZ`
   over `CHIRP_DURATION_S`, then 0 A for the rest of the run. f(t) can be rebuilt offline from
   these constants and the CSV `timestamp_s` column.
+- `EXPERIMENT_PRBS` — pseudo-random binary sequence for system identification: a 15-bit
+  maximum-length LFSR switches the current between +`PRBS_AMPLITUDE_A` and -`PRBS_AMPLITUDE_A`,
+  each bit held for `PRBS_HOLD_CYCLES` cycles. The spectrum is flat up to about
+  `PRBS_BANDWIDTH_HZ` (sinc² roll-off, about 2 dB down at the band edge). The seed is fixed, so
+  every run commands the same sequence. After `PRBS_DURATION_S` the current is 0 A.
 
 ## Real-time setup
 
