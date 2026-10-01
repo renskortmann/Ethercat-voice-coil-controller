@@ -76,7 +76,8 @@ Runtime parameters are compile-time constants in [main.h](main.h):
 | Constant | Default | Meaning |
 |---|---|---|
 | `CYCLE_TIME_MS` | 0.5 | EtherCAT cycle period |
-| `RUN_DURATION_S` | 10.0 | Total run time |
+| `RUN_DURATION_S` | 10.0 | Experiment run time, after the bias idle window |
+| `BIAS_IDLE_S` | 3.0 | 0 A window before the experiment (negative `time_s`) in which the accelerometer bias is measured; see [docs/accelerometer-bias.md](docs/accelerometer-bias.md) |
 | `EXPERIMENT_MODE` | `EXPERIMENT_PRBS` | Which setpoint profile the loop commands (see below) |
 | `SINE_FREQ_HZ` | 10.0 | Sine experiment: target current waveform frequency |
 | `SINE_AMPLITUDE_A` | 2.0 | Sine experiment: target current waveform amplitude |
@@ -133,6 +134,10 @@ python scripts/plot_voice_coil_log.py [path/to/log.csv]
 
 With no argument it plots the newest log in `data/`: actual/target/demand current
 and the two analog inputs against a shared time axis.
+
+Logs start with a 3 s 0 A idle window used to measure the accelerometer bias; the corrected
+signal is the `ai2_corrected_V` column. The notebooks load logs through `vca_log.py`, which
+handles logs with and without that window. See [docs/accelerometer-bias.md](docs/accelerometer-bias.md).
 
 ## Source layout
 

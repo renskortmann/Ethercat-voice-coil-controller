@@ -83,7 +83,7 @@ experiment_target_current_A(double elapsed_s)
 }
 
 /** \brief Run the real-time control loop: generate experiment setpoints, exchange PDO, monitor faults
- *  Operates for RUN_DURATION_S seconds at CYCLE_TIME_MS intervals, synchronized via DC SYNC0.
+ *  Operates for BIAS_IDLE_S (0 A, t < 0) + RUN_DURATION_S seconds at CYCLE_TIME_MS intervals, synchronized via DC SYNC0.
  *  Detects WKC errors and CiA402 state drift; logs samples and faults to in-memory buffers.
  *
  *  No blocking I/O (printf/fprintf) happens inside the cycle loop itself: it would add
@@ -104,7 +104,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 
    struct timespec next_cycle, now, pdo_start, pdo_end;
    int64_t cycle_ns = (int64_t)(CYCLE_TIME_MS * 1000000);
-   double elapsed_s = 0.0;
+   double elapsed_s = -BIAS_IDLE_S;  /* negative during the bias idle window; 0 = experiment start */
    double target_current_A;
    int32_t target_current_raw;
    double cycle_jitter_us;
@@ -133,7 +133,10 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    printf("\nExperiment: PRBS, +/-%.2f A, bandwidth %.1f Hz (%d cycles per bit) for %.2f s, then 0 A\n",
           PRBS_AMPLITUDE_A, PRBS_BANDWIDTH_HZ, PRBS_HOLD_CYCLES, PRBS_DURATION_S);
 #endif
-   printf("Starting %.0f-second cyclic loop... expected WKC: %d\n", RUN_DURATION_S, expected_wkc);
+   printf("Bias window: %.1f s at 0 A before the experiment (t < 0) to measure the accelerometer offset\n",
+          BIAS_IDLE_S);
+   printf("Starting %.0f-second cyclic loop (%.0f s idle + %.0f s experiment)... expected WKC: %d\n",
+          BIAS_IDLE_S + RUN_DURATION_S, BIAS_IDLE_S, RUN_DURATION_S, expected_wkc);
 
    /* SYNC0 stays off: this loop paces itself from CLOCK_MONOTONIC and never phase-locks to the
     * slave's DC clock, so with SYNC0 enabled the frame-arrival phase walks at the two oscillators'
@@ -149,8 +152,17 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 
    while (elapsed_s < RUN_DURATION_S)
    {
-      /* Compute target current for the selected experiment */
-      target_current_A = experiment_target_current_A(elapsed_s);
+      /* Bias idle window (t < 0): hold 0 A with the drive enabled, so the accelerometer offset is
+       * measured in the same electrical conditions as the run. The experiment functions only ever
+       * see t >= 0 (PRBS derives its bit index from elapsed_s and assumes it is non-negative). */
+      if (elapsed_s < 0.0)
+      {
+         target_current_A = 0.0;
+      }
+      else
+      {
+         target_current_A = experiment_target_current_A(elapsed_s);
+      }
 
       /* Convert to raw Int32 (scale: 2^15 / KP) */
       target_current_raw = (int32_t)round((target_current_A * DC2_SCALE) / fieldbus->kp_amps);
@@ -226,7 +238,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       }
 
       add_timespec(&next_cycle, cycle_ns / 1000);
-      elapsed_s = (double)cycle_count * CYCLE_TIME_MS / 1000.0;
+      elapsed_s = (double)cycle_count * CYCLE_TIME_MS / 1000.0 - BIAS_IDLE_S;
       cycle_count++;
    }
 

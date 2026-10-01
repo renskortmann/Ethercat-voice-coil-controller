@@ -11,7 +11,7 @@
  *  is further converted to a signed shaft displacement in mm (AI1_* calibration in main.h). Also
  *  computes bus-referred instantaneous power and integrates cumulative energy delivered to the motor.
  *  \param fieldbus Fieldbus context (buffer and count updated)
- *  \param timestamp_s Absolute time in seconds
+ *  \param timestamp_s Time in seconds; negative during the BIAS_IDLE_S window, 0 = experiment start
  *  \param tx Pointer to received TxPDO data
  *  \param cycle_jitter_us Signed offset between actual and scheduled cycle time (positive = late)
  *  \param pdo_exchange_us Time spent in send + receive processdata this cycle (frame round-trip)
@@ -91,12 +91,53 @@ log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
    }
 }
 
+/** \brief Accelerometer (AI2) bias: mean AI2 voltage over the 0 A idle window (timestamp_s < 0)
+ *  Also prints the bias, sample count and standard deviation, so a disturbed window (table bumped,
+ *  mover not at rest) is visible at the bench.
+ *  \param fieldbus Fieldbus context with populated sample buffer
+ *  \return Bias in Volts, or NAN if the idle window holds no samples (e.g. a fault before t = 0)
+ */
+static double
+compute_ai2_bias_V(const Fieldbus *fieldbus)
+{
+   double sum = 0.0;
+   double sum_sq = 0.0;
+   int n = 0;
+   int i;
+
+   for (i = 0; i < fieldbus->sample_count; i++)
+   {
+      if (fieldbus->samples[i].timestamp_s < 0.0)
+      {
+         sum += fieldbus->samples[i].ai2_value_V;
+         sum_sq += fieldbus->samples[i].ai2_value_V * fieldbus->samples[i].ai2_value_V;
+         n++;
+      }
+   }
+
+   if (n == 0)
+   {
+      printf("WARNING: no samples in the bias idle window; ai2_corrected_V will be nan\n");
+      return NAN;
+   }
+
+   double mean = sum / n;
+   /* Population std from running sums; clamp tiny negative rounding error before sqrt. */
+   double var = sum_sq / n - mean * mean;
+   double std = sqrt(var > 0.0 ? var : 0.0);
+   printf("AI2 bias: %.6f V (mean of %d idle samples over %.2f s, std %.6f V)\n",
+          mean, n, n * CYCLE_TIME_MS / 1000.0, std);
+   return mean;
+}
+
 /** \brief Write sample and fault buffers to CSV files in CSV_DIR, and print fault events
  *  File names carry the compile-time experiment tag (EXPERIMENT_TAG: mode + parameters) followed
  *  by a wall-clock timestamp, so a directory listing shows what each run was. Creates two files:
- *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ..., position_mm)
- *      position_mm is deliberately the last column: scripts/benchmark-rt.sh reads cycle_jitter_us and
- *      pdo_exchange_us by column number (10 and 11), so new columns must be appended, not inserted.
+ *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ..., position_mm, ai2_corrected_V)
+ *      scripts/benchmark-rt.sh reads cycle_jitter_us and pdo_exchange_us by column number (10 and 11),
+ *      so new columns must be appended, not inserted.
+ *      Rows with time_s < 0 are the 0 A bias idle window (BIAS_IDLE_S). ai2_corrected_V is
+ *      ai2_value_V minus its mean over that window; the bias itself is ai2_value_V - ai2_corrected_V.
  *    - voice_coil_faults_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: fault events (timestamp, type, detail, action)
  *  e.g. voice_coil_log_step_release_hold6.0A_ramp0.2s_dur3.0s_20260923_131834.csv
  *  Also prints each fault event to console (deferred from log_fault(), which cannot block on I/O
@@ -116,6 +157,8 @@ export_csv(Fieldbus *fieldbus)
 
    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_info);
 
+   double ai2_bias_V = compute_ai2_bias_V(fieldbus);
+
    /* Create data directory */
    mkdir(CSV_DIR, 0755);
 
@@ -124,10 +167,10 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm,ai2_corrected_V\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f,%.4f\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f,%.4f,%.6f\n",
                  fieldbus->samples[i].timestamp_s,
                  fieldbus->samples[i].actual_current_A,
                  fieldbus->samples[i].target_current_A,
@@ -139,7 +182,8 @@ export_csv(Fieldbus *fieldbus)
                  fieldbus->samples[i].energy_J,
                  fieldbus->samples[i].cycle_jitter_us,
                  fieldbus->samples[i].pdo_exchange_us,
-                 fieldbus->samples[i].position_mm);
+                 fieldbus->samples[i].position_mm,
+                 fieldbus->samples[i].ai2_value_V - ai2_bias_V);
       }
       fclose(fp);
       printf("Wrote %d samples to %s\n", fieldbus->sample_count, sample_file);

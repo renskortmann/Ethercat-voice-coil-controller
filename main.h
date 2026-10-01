@@ -27,7 +27,12 @@
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
-#define RUN_DURATION_S      120.0 /**< Total runtime in seconds */
+#define RUN_DURATION_S      120.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
+/** 0 A rest period before the experiment starts, used to measure the accelerometer (AI2) bias.
+ *  Timestamps are shifted so this window has negative time (-BIAS_IDLE_S .. 0) and the excitation
+ *  still starts at t = 0. Total loop time is BIAS_IDLE_S + RUN_DURATION_S. export_csv() subtracts
+ *  the mean AI2 voltage over this window to produce the ai2_corrected_V column. */
+#define BIAS_IDLE_S         3.0
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
 
 /** \brief Experiment selection (compile-time). Only the per-cycle setpoint changes between
@@ -107,7 +112,7 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #error "Unknown EXPERIMENT_MODE"
 #endif
 
-#define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
+#define MAX_SAMPLES         ((int)((BIAS_IDLE_S + RUN_DURATION_S) / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000
 
 /** CPU core reserved for the real-time cyclic loop. Adjust to match an isolated core
@@ -238,7 +243,7 @@ typedef struct
 /** \brief Timestamped data sample from one cycle of the real-time loop */
 typedef struct
 {
-   double timestamp_s;       /**< Absolute time when sample was acquired */
+   double timestamp_s;       /**< Time when sample was acquired; negative during the BIAS_IDLE_S window, 0 = experiment start */
    double ai1_value_V;       /**< Analog input 1 scaled value in physical Volts (201Ah, DAI) at this timestamp */
    double ai2_value_V;       /**< Analog input 2 scaled value in physical Volts (201Ah, DAI) at this timestamp */
    double actual_current_A;  /**< Actual motor current in physical Amps at this timestamp */
