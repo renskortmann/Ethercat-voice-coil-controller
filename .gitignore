@@ -9,3 +9,5 @@
 /build
 /.venv
 __pycache__/
+/signals/*.csv
+/signals/*.png
