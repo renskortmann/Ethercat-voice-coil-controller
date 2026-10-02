@@ -155,6 +155,7 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
  *  Write the numbers with a decimal point (1.0, not 1): they are copied verbatim into the file name. */
 #define POS_REF_SHAPE_STEPS 0    /**< Breakpoints from POS_REF_STEPS, linearly ramped over POS_REF_RAMP_S */
 #define POS_REF_SHAPE_SINE  1    /**< POS_REF_SINE_OFFSET_MM + POS_REF_SINE_AMPLITUDE_MM * sin(2 pi f t) */
+#define POS_REF_SHAPE_CHIRP 2    /**< Exponential sine sweep POS_REF_CHIRP_F0_HZ -> POS_REF_CHIRP_F1_HZ around POS_REF_CHIRP_OFFSET_MM */
 #define POS_REF_SHAPE       POS_REF_SHAPE_STEPS
 /** X(time_s, position_mm) breakpoints: at time_s the reference ramps linearly from the previous value
  *  to position_mm over POS_REF_RAMP_S, then holds; the last value is held until RUN_DURATION_S. One
@@ -165,6 +166,16 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #define POS_REF_SINE_OFFSET_MM    0.0   /**< Sine reference centre, in mm */
 #define POS_REF_SINE_AMPLITUDE_MM 1.0   /**< Sine reference amplitude, in mm */
 #define POS_REF_SINE_FREQ_HZ      0.2   /**< Sine reference frequency, in Hz */
+/** Chirp reference (POS_REF_SHAPE_CHIRP): offset until POS_REF_CHIRP_START_S, then
+ *  offset + amplitude * sin(phase) with the exponential sweep f(t) = f0 * (f1 / f0)^(t / T) (equal time per
+ *  octave, same law as the current-mode CHIRP), then offset until RUN_DURATION_S. The sweep runs on to the
+ *  next zero crossing after T (at most half a period), so the reference has no step at either end. */
+#define POS_REF_CHIRP_OFFSET_MM    0.0   /**< Chirp centre, in mm */
+#define POS_REF_CHIRP_AMPLITUDE_MM 3.0   /**< Chirp amplitude, in mm */
+#define POS_REF_CHIRP_F0_HZ        1.0   /**< Start frequency in Hz (> 0) */
+#define POS_REF_CHIRP_F1_HZ        10.0  /**< End frequency in Hz */
+#define POS_REF_CHIRP_DURATION_S   60.0  /**< Sweep length T in seconds */
+#define POS_REF_CHIRP_START_S      2.0   /**< Hold at the offset before the sweep starts, in seconds */
 #define PID_KP_A_PER_MM     0.02  /**< Proportional gain: Amps per mm of position error */
 #define PID_KI_A_PER_MM_S   0.2   /**< Integral gain: Amps per mm of error per second */
 /* No D term yet: the laser signal carries noise and 50 Hz pickup. A later D term should act on the
@@ -215,6 +226,19 @@ _Static_assert((int)((POS_REF_SINE_OFFSET_MM - POS_REF_SINE_AMPLITUDE_MM) * 1000
                "POS_REF_SINE offset +/- amplitude outside POS_REF_MIN_MM .. POS_REF_MAX_MM");
 _Static_assert((int)(POS_REF_SINE_FREQ_HZ * 1000) > 0 && (int)(POS_REF_SINE_FREQ_HZ * CYCLE_TIME_MS) <= 100,
                "POS_REF_SINE_FREQ_HZ must be > 0 and give at least 10 samples per period");
+#elif POS_REF_SHAPE == POS_REF_SHAPE_CHIRP
+_Static_assert((int)((POS_REF_CHIRP_OFFSET_MM - POS_REF_CHIRP_AMPLITUDE_MM) * 1000) >= (int)(POS_REF_MIN_MM * 1000) &&
+               (int)((POS_REF_CHIRP_OFFSET_MM + POS_REF_CHIRP_AMPLITUDE_MM) * 1000) <= (int)(POS_REF_MAX_MM * 1000),
+               "POS_REF_CHIRP offset +/- amplitude outside POS_REF_MIN_MM .. POS_REF_MAX_MM");
+_Static_assert((int)(POS_REF_CHIRP_F0_HZ * 1000) > 0 && (int)(POS_REF_CHIRP_F0_HZ * 1000) != (int)(POS_REF_CHIRP_F1_HZ * 1000),
+               "POS_REF_CHIRP_F0_HZ must be > 0 and differ from POS_REF_CHIRP_F1_HZ");
+_Static_assert((int)(POS_REF_CHIRP_F0_HZ * CYCLE_TIME_MS) <= 100 && (int)(POS_REF_CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
+               "POS_REF_CHIRP frequencies must give at least 10 samples per period");
+_Static_assert((int)(POS_REF_CHIRP_DURATION_S * 1000) > 0 && (int)(POS_REF_CHIRP_START_S * 1000) >= 0,
+               "POS_REF_CHIRP_DURATION_S must be > 0 and POS_REF_CHIRP_START_S >= 0");
+/* The sweep ends at the next zero crossing after T, at most half a period of f1 later; 0.1 s covers f1 >= 5 Hz. */
+_Static_assert((int)((POS_REF_CHIRP_START_S + POS_REF_CHIRP_DURATION_S + 0.1) * 1000) <= (int)(RUN_DURATION_S * 1000),
+               "POS_REF_CHIRP_START_S + POS_REF_CHIRP_DURATION_S (+0.1 s) must fit in RUN_DURATION_S");
 #else
 #error "Unknown POS_REF_SHAPE"
 #endif
@@ -246,6 +270,12 @@ _Static_assert((int)(POS_REF_SINE_FREQ_HZ * 1000) > 0 && (int)(POS_REF_SINE_FREQ
 #elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_STEPS
 #define EXPERIMENT_TAG "posPI_steps_" POS_REF_STEPS_NAME "r" STRINGIFY(POS_REF_RAMP_S) "s_kp" \
                        STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG
+#elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_CHIRP
+#define EXPERIMENT_TAG "posPI_chirp_" STRINGIFY(POS_REF_CHIRP_OFFSET_MM) "mm_" \
+                       STRINGIFY(POS_REF_CHIRP_AMPLITUDE_MM) "mm_" STRINGIFY(POS_REF_CHIRP_F0_HZ) "to" \
+                       STRINGIFY(POS_REF_CHIRP_F1_HZ) "Hz_" STRINGIFY(POS_REF_CHIRP_DURATION_S) "s_hold" \
+                       STRINGIFY(POS_REF_CHIRP_START_S) "s_kp" STRINGIFY(PID_KP_A_PER_MM) "_ki" \
+                       STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG
 #elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_SINE
 #define EXPERIMENT_TAG "posPI_sine_" STRINGIFY(POS_REF_SINE_OFFSET_MM) "mm_" \
                        STRINGIFY(POS_REF_SINE_AMPLITUDE_MM) "mm_" STRINGIFY(POS_REF_SINE_FREQ_HZ) "Hz_kp" \

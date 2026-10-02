@@ -56,6 +56,18 @@ amps_to_target_current_raw(double amps, double kp_amps)
    return (int16_t)lround(raw);
 }
 
+/** \brief Phase of an exponential sweep f(t) = f0 * (f1 / f0)^(t / T), i.e. equal time per octave.
+ *  Shared by the current-mode chirps and the position chirp reference.
+ *  \param t Time since the start of the sweep in seconds
+ *  \return Phase in radians: the integral of 2 pi f(t), which is 2 pi f0 L (exp(t / L) - 1), L = T / ln(f1 / f0)
+ */
+static inline double
+exp_chirp_phase(double t, double f0, double f1, double T)
+{
+   const double L = T / log(f1 / f0);
+   return 2.0 * M_PI * f0 * L * (exp(t / L) - 1.0);
+}
+
 #if EXPERIMENT_MODE == EXPERIMENT_CHIRP || EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
 /** \brief Unit-amplitude exponential chirp CHIRP_F0_HZ -> CHIRP_F1_HZ over CHIRP_DURATION_S
  *  \param t Time since the start of the sweep in seconds (0 <= t < CHIRP_DURATION_S)
@@ -64,9 +76,7 @@ amps_to_target_current_raw(double amps, double kp_amps)
 static double
 chirp_unit(double t)
 {
-   /* Phase is the integral of f(t) = f0 * exp(t / L), with L = T / ln(f1 / f0). */
-   const double L = CHIRP_DURATION_S / log(CHIRP_F1_HZ / CHIRP_F0_HZ);
-   return sin(2.0 * M_PI * CHIRP_F0_HZ * L * (exp(t / L) - 1.0));
+   return sin(exp_chirp_phase(t, CHIRP_F0_HZ, CHIRP_F1_HZ, CHIRP_DURATION_S));
 }
 #endif
 
@@ -212,6 +222,28 @@ static const struct
 #define POS_REF_STEPS_N ((int)(sizeof(pos_ref_steps) / sizeof(pos_ref_steps[0])))
 #endif
 
+#if POS_REF_SHAPE == POS_REF_SHAPE_CHIRP
+/** \brief Sweep time at which the position chirp ends: the first zero crossing of the sine at or after
+ *  POS_REF_CHIRP_DURATION_S, so the reference returns to the offset without a step. Computed by inverting
+ *  the phase: tau = L ln(1 + phase / (2 pi f0 L)) at phase = pi * ceil(phase(T) / pi).
+ *  \return Sweep time in seconds since POS_REF_CHIRP_START_S (T <= result < T + half a period of f1)
+ */
+static double
+pos_ref_chirp_end_s(void)
+{
+   static double end_s = -1.0;   /* computed once; pos_ref_mm() calls this every cycle */
+   if (end_s < 0.0)
+   {
+      const double L = POS_REF_CHIRP_DURATION_S / log(POS_REF_CHIRP_F1_HZ / POS_REF_CHIRP_F0_HZ);
+      double phase_T = exp_chirp_phase(POS_REF_CHIRP_DURATION_S, POS_REF_CHIRP_F0_HZ, POS_REF_CHIRP_F1_HZ,
+                                       POS_REF_CHIRP_DURATION_S);
+      double phase_end = M_PI * ceil(phase_T / M_PI);
+      end_s = L * log(1.0 + phase_end / (2.0 * M_PI * POS_REF_CHIRP_F0_HZ * L));
+   }
+   return end_s;
+}
+#endif
+
 /** \brief Position reference at time t
  *  \param t Time since the controller started in seconds (t >= 0)
  *  \return Reference position in mm (absolute position_mm frame)
@@ -234,6 +266,14 @@ pos_ref_mm(double t)
       return prev_mm + (pos_ref_steps[i].pos_mm - prev_mm) * (into_ramp_s / POS_REF_RAMP_S);
    }
    return pos_ref_steps[i].pos_mm;
+#elif POS_REF_SHAPE == POS_REF_SHAPE_CHIRP
+   double tau = t - POS_REF_CHIRP_START_S;
+   if (tau <= 0.0 || tau >= pos_ref_chirp_end_s())
+   {
+      return POS_REF_CHIRP_OFFSET_MM;                        /* hold before and after the sweep */
+   }
+   return POS_REF_CHIRP_OFFSET_MM + POS_REF_CHIRP_AMPLITUDE_MM *
+          sin(exp_chirp_phase(tau, POS_REF_CHIRP_F0_HZ, POS_REF_CHIRP_F1_HZ, POS_REF_CHIRP_DURATION_S));
 #else
    return POS_REF_SINE_OFFSET_MM + POS_REF_SINE_AMPLITUDE_MM * sin(2.0 * M_PI * POS_REF_SINE_FREQ_HZ * t);
 #endif
@@ -576,6 +616,13 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    {
       printf("  ramp time %.2f s\n", POS_REF_RAMP_S);
    }
+#elif POS_REF_SHAPE == POS_REF_SHAPE_CHIRP
+   printf("  reference: absolute chirp, %+.3f mm + %.3f mm * sin(phase), exponential sweep %.2f -> %.2f Hz\n",
+          POS_REF_CHIRP_OFFSET_MM, POS_REF_CHIRP_AMPLITUDE_MM, POS_REF_CHIRP_F0_HZ, POS_REF_CHIRP_F1_HZ);
+   printf("  hold %+.3f mm until t = %.2f s, sweep until t = %.3f s (next zero crossing after %.2f s), "
+          "then hold until t = %.2f s\n", POS_REF_CHIRP_OFFSET_MM, POS_REF_CHIRP_START_S,
+          POS_REF_CHIRP_START_S + pos_ref_chirp_end_s(), POS_REF_CHIRP_START_S + POS_REF_CHIRP_DURATION_S,
+          RUN_DURATION_S);
 #else
    printf("  reference: absolute sine, %+.3f mm + %.3f mm * sin(2 pi %.3f Hz t)\n",
           POS_REF_SINE_OFFSET_MM, POS_REF_SINE_AMPLITUDE_MM, POS_REF_SINE_FREQ_HZ);

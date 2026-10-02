@@ -6,7 +6,7 @@ Two uses:
 * Preview, before a run (no hardware, no log):
       python scripts/plot_voice_coil_log_ref_track.py --preview
   Reads the reference settings straight from main.h (POS_REF_SHAPE, POS_REF_STEPS,
-  POS_REF_RAMP_S, POS_REF_SINE_*, RUN_DURATION_S, BIAS_IDLE_S) and plots the
+  POS_REF_RAMP_S, POS_REF_SINE_*, POS_REF_CHIRP_*, RUN_DURATION_S, BIAS_IDLE_S) and plots the
   reference the controller will track, with the allowed reference window and the
   position trip limits. Also prints the breakpoint table.
 
@@ -22,6 +22,10 @@ Two uses:
   The reference comes from the log's position_ref_mm column, i.e. exactly what the
   controller used. If the log has no such column it falls back to the main.h
   reference and says so. If main.h has changed since the run, a note is printed.
+  For chirp runs (posPI_chirp in the file name) it also prints and plots the tracking
+  per frequency: amplitude of position / reference and phase lag, fitted in windows
+  of a few periods around 1, 1.5, 2, 3 ... 10 Hz. That analysis uses only the logged
+  reference and position, not main.h.
 
 The reference semantics mirror pos_ref_mm() in control_loop.c: at each breakpoint
 the reference ramps linearly from the previous value over POS_REF_RAMP_S and then
@@ -62,18 +66,25 @@ def read_main_h(path: str = MAIN_H) -> dict:
         return float(define(name))
 
     shape = define("POS_REF_SHAPE")
-    if shape not in ("POS_REF_SHAPE_STEPS", "POS_REF_SHAPE_SINE"):
+    shapes = {"POS_REF_SHAPE_STEPS": "steps", "POS_REF_SHAPE_SINE": "sine", "POS_REF_SHAPE_CHIRP": "chirp"}
+    if shape not in shapes:
         sys.exit(f"unknown POS_REF_SHAPE {shape!r} in {path}")
     steps = [(float(t), float(p)) for t, p in
              re.findall(r"X\(\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\)", define(r"POS_REF_STEPS\(X\)"))]
     return {
         "mode": define("EXPERIMENT_MODE"),
-        "shape": "steps" if shape == "POS_REF_SHAPE_STEPS" else "sine",
+        "shape": shapes[shape],
         "steps": steps,
         "ramp_s": number("POS_REF_RAMP_S"),
         "sine_offset_mm": number("POS_REF_SINE_OFFSET_MM"),
         "sine_amplitude_mm": number("POS_REF_SINE_AMPLITUDE_MM"),
         "sine_freq_hz": number("POS_REF_SINE_FREQ_HZ"),
+        "chirp_offset_mm": number("POS_REF_CHIRP_OFFSET_MM"),
+        "chirp_amplitude_mm": number("POS_REF_CHIRP_AMPLITUDE_MM"),
+        "chirp_f0_hz": number("POS_REF_CHIRP_F0_HZ"),
+        "chirp_f1_hz": number("POS_REF_CHIRP_F1_HZ"),
+        "chirp_duration_s": number("POS_REF_CHIRP_DURATION_S"),
+        "chirp_start_s": number("POS_REF_CHIRP_START_S"),
         "run_s": number("RUN_DURATION_S"),
         "idle_s": number("BIAS_IDLE_S"),
         "ref_min_mm": number("POS_REF_MIN_MM"),
@@ -85,10 +96,30 @@ def read_main_h(path: str = MAIN_H) -> dict:
     }
 
 
+def chirp_phase(cfg: dict, tau: float) -> float:
+    """Exponential sweep phase, mirroring exp_chirp_phase() in control_loop.c."""
+    f0, f1, T = cfg["chirp_f0_hz"], cfg["chirp_f1_hz"], cfg["chirp_duration_s"]
+    L = T / math.log(f1 / f0)
+    return 2 * math.pi * f0 * L * (math.exp(tau / L) - 1.0)
+
+
+def chirp_end_s(cfg: dict) -> float:
+    """Sweep time of the first zero crossing at or after T, mirroring pos_ref_chirp_end_s()."""
+    f0, f1, T = cfg["chirp_f0_hz"], cfg["chirp_f1_hz"], cfg["chirp_duration_s"]
+    L = T / math.log(f1 / f0)
+    phase_end = math.pi * math.ceil(chirp_phase(cfg, T) / math.pi)
+    return L * math.log(1.0 + phase_end / (2 * math.pi * f0 * L))
+
+
 def reference_mm(cfg: dict, t: float) -> float:
     """Reference at time t, mirroring pos_ref_mm() in control_loop.c (nan in the idle window)."""
     if t < 0.0:
         return float("nan")
+    if cfg["shape"] == "chirp":
+        tau = t - cfg["chirp_start_s"]
+        if tau <= 0.0 or tau >= chirp_end_s(cfg):
+            return cfg["chirp_offset_mm"]
+        return cfg["chirp_offset_mm"] + cfg["chirp_amplitude_mm"] * math.sin(chirp_phase(cfg, tau))
     if cfg["shape"] == "sine":
         return cfg["sine_offset_mm"] + cfg["sine_amplitude_mm"] * math.sin(2 * math.pi * cfg["sine_freq_hz"] * t)
     steps = cfg["steps"]
@@ -122,6 +153,15 @@ def describe(cfg: dict) -> str:
                 end = t + cfg["ramp_s"]
                 lines.append(f"  t = {t:6.2f} .. {end:6.2f} s : ramp {cfg['steps'][i - 1][1]:+.3f} -> {p:+.3f} mm, then hold")
         lines.append(f"  last value held until t = {cfg['run_s']:.2f} s, then voltage off")
+    elif cfg["shape"] == "chirp":
+        start, end = cfg["chirp_start_s"], cfg["chirp_start_s"] + chirp_end_s(cfg)
+        lines.append(f"reference: absolute chirp {cfg['chirp_offset_mm']:+.3f} mm + {cfg['chirp_amplitude_mm']:.3f} mm "
+                     f"* sin(phase), exponential sweep {cfg['chirp_f0_hz']} -> {cfg['chirp_f1_hz']} Hz")
+        lines.append(f"  t = 0 .. {start:.2f} s        : hold {cfg['chirp_offset_mm']:+.3f} mm")
+        lines.append(f"  t = {start:.2f} .. {end:.3f} s : sweep, f(t) = {cfg['chirp_f0_hz']} * "
+                     f"({cfg['chirp_f1_hz']}/{cfg['chirp_f0_hz']})^((t - {start:g}) / {cfg['chirp_duration_s']:g}) Hz "
+                     f"(ends at the zero crossing after {cfg['chirp_start_s'] + cfg['chirp_duration_s']:.2f} s)")
+        lines.append(f"  t = {end:.3f} .. {cfg['run_s']:.2f} s : hold {cfg['chirp_offset_mm']:+.3f} mm, then voltage off")
     else:
         lines.append(f"reference: absolute sine {cfg['sine_offset_mm']:+.3f} mm + {cfg['sine_amplitude_mm']:.3f} mm "
                      f"* sin(2 pi {cfg['sine_freq_hz']} Hz t), t = 0 .. {cfg['run_s']:.2f} s")
@@ -190,6 +230,54 @@ def read_columns(path: str, names: list[str]) -> tuple[list[float], dict[str, li
     return time_s, cols
 
 
+CHIRP_ANALYSIS_HZ = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0)
+CHIRP_WINDOW_PERIODS = 2.0  # fit window: +/- this many periods around the target frequency
+
+
+def chirp_tracking(t: list[float], r: list[float], y: list[float]) -> list[tuple[float, float, float, float]]:
+    """Amplitude ratio and phase lag of y relative to a swept-sine reference r, per frequency.
+
+    Uses only the logged signals: the local frequency comes from the spacing of the reference's
+    zero crossings around its centre value, and in a window of +/- CHIRP_WINDOW_PERIODS periods
+    y is least-squares fitted as  a*r + b*(dr/dt)/w + c  (w = 2 pi f), so that
+    gain = |a + j*b| (in the sense y = gain * A sin(phase - lag)) and lag = -angle(a + j*b).
+    Returns (target Hz, local Hz, gain, lag in degrees) for each frequency the sweep reached.
+    """
+    import numpy as np
+
+    t = np.asarray(t)
+    r = np.asarray(r)
+    y = np.asarray(y)
+    ok = np.isfinite(r) & np.isfinite(y)
+    t, r, y = t[ok], r[ok], y[ok]
+    centre = np.median(r[t >= 0][:200])                 # the hold value before the sweep
+    d = r - centre
+    idx = np.nonzero((d[:-1] < 0) != (d[1:] < 0))[0]
+    zc = t[idx] - d[idx] * (t[idx + 1] - t[idx]) / (d[idx + 1] - d[idx])
+    if len(zc) < 6:
+        return []
+    f_local = 0.5 / np.diff(zc)
+    t_mid = 0.5 * (zc[1:] + zc[:-1])
+    drdt = np.gradient(r, t)
+    out = []
+    for f_target in CHIRP_ANALYSIS_HZ:
+        k = int(np.argmin(np.abs(f_local - f_target)))
+        if abs(f_local[k] - f_target) > 0.05 * f_target:
+            continue                                     # the sweep never reached this frequency
+        # Keep the window inside the sweep: at the ends, shift it inwards (and report that frequency).
+        half = CHIRP_WINDOW_PERIODS / f_local[k]
+        t_c = min(max(t_mid[k], zc[0] + half), zc[-1] - half)
+        k = int(np.argmin(np.abs(t_mid - t_c)))
+        f = f_local[k]
+        w = 2 * np.pi * f
+        m = np.abs(t - t_c) <= half
+        X = np.column_stack([r[m] - centre, drdt[m] / w, np.ones(m.sum())])
+        (a, b, _), *_ = np.linalg.lstsq(X, y[m], rcond=None)
+        # r - centre = A sin(phi), dr/dt / w = A cos(phi); y ~ a A sin(phi) + b A cos(phi) = g A sin(phi - lag)
+        out.append((f_target, f, math.hypot(a, b), -math.degrees(math.atan2(b, a))))
+    return out
+
+
 def tracking(cfg: dict, path: str) -> None:
     names = ["position_mm", "position_ref_mm", "pid_p_A", "pid_i_A", "pid_output_A", "actual_current_A",
              "position_filt_mm"]
@@ -256,6 +344,27 @@ def tracking(cfg: dict, path: str) -> None:
     ax_cur.legend(loc="upper right", fontsize="small", ncol=2)
 
     fig.tight_layout()
+
+    if "posPI_chirp" in os.path.basename(path):
+        rows = chirp_tracking(t, r, y)
+        if rows:
+            print("\nchirp tracking (raw position vs reference):")
+            print("  target Hz | local Hz | amplitude | lag (deg)")
+            for f_t, f, g, lag in rows:
+                print(f"  {f_t:9.1f} | {f:8.2f} | {g * 100:7.1f} % | {lag:8.1f}")
+            fig2, (ax_g, ax_p) = plt.subplots(2, 1, sharex=True, figsize=(7, 6))
+            fig2.suptitle("Chirp tracking: position / reference", fontsize="medium")
+            fs = [row[1] for row in rows]
+            ax_g.semilogx(fs, [row[2] * 100 for row in rows], "o-", color="tab:blue")
+            ax_g.axhline(100, color="0.5", lw=0.8)
+            ax_g.set_ylabel("amplitude (%)")
+            ax_p.semilogx(fs, [row[3] for row in rows], "o-", color="tab:red")
+            ax_p.axhline(0, color="0.5", lw=0.8)
+            ax_p.set_ylabel("lag (deg)")
+            ax_p.set_xlabel("frequency (Hz)")
+            for ax in (ax_g, ax_p):
+                ax.grid(True, which="both", alpha=0.3)
+            fig2.tight_layout()
     plt.show()
 
 

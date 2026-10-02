@@ -46,6 +46,16 @@ The reference is fixed when you compile. It is an **absolute** position in the `
   - After the last breakpoint the value is held until the end of the run.
   - One breakpoint gives a constant setpoint.
 - **Sine** (`POS_REF_SHAPE_SINE`): offset + amplitude · sin(2π f t).
+- **Chirp** (`POS_REF_SHAPE_CHIRP`): a sine whose frequency sweeps from f0 to f1.
+  - **Before:** hold the offset until `POS_REF_CHIRP_START_S`, so the pull-in from rest settles first.
+  - **During:** offset + amplitude · sin(φ), with an exponential sweep f(t) = f0 · (f1/f0)^(t/T). Every octave takes the same time; for 1 → 10 Hz in 60 s that is about 18 s per octave. It's the same law as the current-mode chirp experiments.
+  - **End:** the sweep runs on to the next zero crossing after T (at most half a period, e.g. +48 ms for 1 → 10 Hz), then holds the offset. The reference therefore has no step at either end.
+  - **Analysis:** for chirp runs, `scripts/plot_voice_coil_log_ref_track.py` also prints and plots amplitude (position / reference) and phase lag at 1, 1.5, 2, 3 … 10 Hz.
+
+  **What to expect with PI only** (simulation of the real controller, Kp 1.0 / Ki 0.12, 3 mm, 1 → 10 Hz):
+  - At low frequency the shaft falls short and lags because of friction (about 84 % and 12° at 1 Hz, as in the 1 Hz sine run).
+  - Towards 10 Hz the sweep approaches the closed-loop mode near 12 Hz, so the motion is **amplified**: about 150 % (±4.5 mm) at 10 Hz with realistic friction, up to about 290 % (±9 mm) with the lowest damping estimate.
+  - Feedforward is the planned next step to flatten this.
 
 ### PI controller
 Every cycle, from t = 0 on, with Δt = 0.5 ms:
@@ -241,10 +251,11 @@ All settings are `#define`s in `main.h`. Rebuild after changing them.
 |---|---|
 | Select this experiment | `EXPERIMENT_MODE` = `EXPERIMENT_POSITION_PID` |
 | Run length (after the 3 s idle window) | `RUN_DURATION_S` (36 s; other experiments need it longer, their checks will tell you) |
-| Reference shape | `POS_REF_SHAPE` = `POS_REF_SHAPE_STEPS` or `POS_REF_SHAPE_SINE` |
+| Reference shape | `POS_REF_SHAPE` = `POS_REF_SHAPE_STEPS`, `POS_REF_SHAPE_SINE` or `POS_REF_SHAPE_CHIRP` |
 | Step breakpoints | `POS_REF_STEPS(X)`: `X(time_s, position_mm)` entries, numbers with a decimal point |
 | Ramp time between steps | `POS_REF_RAMP_S` |
 | Sine reference | `POS_REF_SINE_OFFSET_MM`, `POS_REF_SINE_AMPLITUDE_MM`, `POS_REF_SINE_FREQ_HZ` |
+| Chirp reference | `POS_REF_CHIRP_OFFSET_MM`, `POS_REF_CHIRP_AMPLITUDE_MM`, `POS_REF_CHIRP_F0_HZ`, `POS_REF_CHIRP_F1_HZ`, `POS_REF_CHIRP_DURATION_S`, `POS_REF_CHIRP_START_S` (`RUN_DURATION_S` must cover start + duration) |
 | Gains | `PID_KP_A_PER_MM`, `PID_KI_A_PER_MM_S` |
 | Output current limit | `PID_OUTPUT_LIMIT_A` |
 | Allowed reference range | `POS_REF_MIN_MM`, `POS_REF_MAX_MM` |
