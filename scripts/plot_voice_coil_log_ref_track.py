@@ -13,9 +13,12 @@ Two uses:
 * Tracking, after a run:
       python scripts/plot_voice_coil_log_ref_track.py [path/to/log.csv]
   With no path the newest log in gcsc_data/ is used. Three stacked axes:
-    position (mm)  -- measured position (raw and 60 Hz low-pass) over the reference
+    position (mm)  -- raw position and the position the PI used, over the reference
     current (A)    -- PI output, its P and I terms, and the measured coil current
     error (mm)     -- reference - position (low-pass), the tracking error
+  The position trace and the error use position_filt_mm, the position the PI actually
+  used (notched if POS_NOTCH_ENABLE), when the log has it; older logs show a 60 Hz
+  low-pass of the raw position instead.
   The reference comes from the log's position_ref_mm column, i.e. exactly what the
   controller used. If the log has no such column it falls back to the main.h
   reference and says so. If main.h has changed since the run, a note is printed.
@@ -188,7 +191,8 @@ def read_columns(path: str, names: list[str]) -> tuple[list[float], dict[str, li
 
 
 def tracking(cfg: dict, path: str) -> None:
-    names = ["position_mm", "position_ref_mm", "pid_p_A", "pid_i_A", "pid_output_A", "actual_current_A"]
+    names = ["position_mm", "position_ref_mm", "pid_p_A", "pid_i_A", "pid_output_A", "actual_current_A",
+             "position_filt_mm"]
     t, c = read_columns(path, names)
     if not t:
         sys.exit(f"no usable rows in {path}")
@@ -205,13 +209,22 @@ def tracking(cfg: dict, path: str) -> None:
             print(f"note: main.h's reference differs from this run's by up to {diff:.3f} mm "
                   "(main.h changed since the run); plotting the run's own reference")
 
-    y_lp = low_pass(t, y, POSITION_LP_CUTOFF_HZ)
-    err_lp = [a - b if math.isfinite(a) else float("nan") for a, b in zip(r, y_lp)]
-    run = [i for i, x in enumerate(t) if x >= 0.0 and math.isfinite(err_lp[i])]
+    # Logs with position_filt_mm: show and use exactly the position the PI acted on (notched or raw).
+    # Older logs: fall back to a 60 Hz low-pass of the raw position, for display only.
+    if any(math.isfinite(v) for v in c["position_filt_mm"]):
+        y_ctrl = c["position_filt_mm"]
+        ctrl_label = "position used by PI (notched if enabled)"
+        err_label = "error r - y (as seen by PI)"
+    else:
+        y_ctrl = low_pass(t, y, POSITION_LP_CUTOFF_HZ)
+        ctrl_label = f"position ({POSITION_LP_CUTOFF_HZ:.0f} Hz low-pass)"
+        err_label = f"{POSITION_LP_CUTOFF_HZ:.0f} Hz low-passed"
+    err = [a - b if math.isfinite(a) else float("nan") for a, b in zip(r, y_ctrl)]
+    run = [i for i, x in enumerate(t) if x >= 0.0 and math.isfinite(err[i])]
     if run:
-        rms = math.sqrt(sum(err_lp[i] ** 2 for i in run) / len(run))
-        print(f"tracking error (60 Hz low-passed), t >= 0: rms {rms:.3f} mm, "
-              f"max |e| {max(abs(err_lp[i]) for i in run):.3f} mm")
+        rms = math.sqrt(sum(err[i] ** 2 for i in run) / len(run))
+        print(f"tracking error ({err_label}), t >= 0: rms {rms:.3f} mm, "
+              f"max |e| {max(abs(err[i]) for i in run):.3f} mm")
     u = [v for v in c["pid_output_A"] if math.isfinite(v)]
     if u:
         print(f"PI output: max |u| {max(abs(v) for v in u):.3f} A")
@@ -224,13 +237,13 @@ def tracking(cfg: dict, path: str) -> None:
         ax.grid(True, alpha=0.3)
 
     ax_pos.plot(t, y, color="tab:brown", lw=0.6, alpha=0.5, label="position (raw)")
-    ax_pos.plot(t, y_lp, color="black", lw=1.0, label=f"position ({POSITION_LP_CUTOFF_HZ:.0f} Hz low-pass)")
+    ax_pos.plot(t, y_ctrl, color="black", lw=1.0, label=ctrl_label)
     ax_pos.plot(t, r, color="tab:red", lw=1.6, label="reference")
     draw_limits(ax_pos, cfg)
     ax_pos.set_ylabel("position_mm (mm)")
     ax_pos.legend(loc="upper right", fontsize="small", ncol=2)
 
-    ax_err.plot(t, err_lp, color="tab:purple", lw=1.0)
+    ax_err.plot(t, err, color="tab:purple", lw=1.0)
     ax_err.axhline(0.0, color="0.5", lw=0.8)
     ax_err.set_ylabel("error r - y (mm)")
     ax_err.set_xlabel("time_s (s)")

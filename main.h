@@ -175,6 +175,17 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #define POS_TRIP_MIN_MM     -10.0 /**< Runtime trip: 0 A and shut down below this position, in mm */
 #define POS_TRIP_MAX_MM     10.0  /**< Runtime trip: 0 A and shut down above this position, in mm */
 #define POS_TRIP_CYCLES     3     /**< Consecutive cycles outside the trip window before tripping (rejects single noise spikes) */
+/** Notch filter on the position the PI uses, against 50 Hz mains pickup on the laser signal. A notch
+ *  instead of a low-pass: it removes 50 Hz with only ~1.5 deg lag at the 7-12 Hz loop frequencies. The
+ *  position trip always uses the raw, unfiltered position. See docs/position-control.md. */
+#define POS_NOTCH_ENABLE    1     /**< 1 = PI uses the notched position, 0 = PI uses the raw position */
+#define POS_NOTCH_FREQ_HZ   50.0  /**< Notch centre frequency in Hz (mains) */
+#define POS_NOTCH_Q         10.0  /**< Notch quality factor: -3 dB width = POS_NOTCH_FREQ_HZ / POS_NOTCH_Q. Higher Q = less lag at the loop frequency (Q 5 can destabilise Kp ~1 A/mm if damping is low) */
+#if POS_NOTCH_ENABLE
+#define POS_NOTCH_TAG       "_notch" STRINGIFY(POS_NOTCH_FREQ_HZ) "Hz_Q" STRINGIFY(POS_NOTCH_Q)
+#else
+#define POS_NOTCH_TAG       ""
+#endif
 /** \brief Breakpoint table and file-name label, both generated from POS_REF_STEPS. The label is
  *  e.g. "0.0s0.0mm-8.0s1.0mm-": each breakpoint as <time>s<position>mm. */
 #define POS_REF_STEPS_ENTRY_(t, p)  {t, p},
@@ -191,6 +202,10 @@ _Static_assert((int)(PID_OUTPUT_LIMIT_A * 1000) > 0, "PID_OUTPUT_LIMIT_A must be
 _Static_assert((int)(PID_KP_A_PER_MM * 1e6) >= 0 && (int)(PID_KI_A_PER_MM_S * 1e6) >= 0,
                "PID gains must be >= 0 (a negative gain is positive feedback)");
 _Static_assert(POS_TRIP_CYCLES >= 1, "POS_TRIP_CYCLES must be >= 1");
+_Static_assert(POS_NOTCH_ENABLE == 0 || POS_NOTCH_ENABLE == 1, "POS_NOTCH_ENABLE must be 0 or 1");
+_Static_assert((int)(POS_NOTCH_FREQ_HZ * 1000) > 0 && (int)(POS_NOTCH_FREQ_HZ * CYCLE_TIME_MS) < 500,
+               "POS_NOTCH_FREQ_HZ must be > 0 and below the Nyquist frequency (500 / CYCLE_TIME_MS Hz)");
+_Static_assert((int)(POS_NOTCH_Q * 1000) > 0, "POS_NOTCH_Q must be > 0");
 #if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
 _Static_assert(1 POS_REF_STEPS(POS_REF_IN_WINDOW_),
                "POS_REF_STEPS position outside POS_REF_MIN_MM .. POS_REF_MAX_MM");
@@ -230,11 +245,11 @@ _Static_assert((int)(POS_REF_SINE_FREQ_HZ * 1000) > 0 && (int)(POS_REF_SINE_FREQ
 #define EXPERIMENT_TAG "noise_0A_" STRINGIFY(RUN_DURATION_S) "s"
 #elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_STEPS
 #define EXPERIMENT_TAG "posPI_steps_" POS_REF_STEPS_NAME "r" STRINGIFY(POS_REF_RAMP_S) "s_kp" \
-                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S)
+                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG
 #elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_SINE
 #define EXPERIMENT_TAG "posPI_sine_" STRINGIFY(POS_REF_SINE_OFFSET_MM) "mm_" \
                        STRINGIFY(POS_REF_SINE_AMPLITUDE_MM) "mm_" STRINGIFY(POS_REF_SINE_FREQ_HZ) "Hz_kp" \
-                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S)
+                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
 #define EXPERIMENT_TAG "prbs_" STRINGIFY(PRBS_AMPLITUDE_A) "A_" STRINGIFY(PRBS_BANDWIDTH_HZ) "Hz_" \
                        STRINGIFY(PRBS_DURATION_S) "s"
@@ -399,6 +414,7 @@ typedef struct
    double pid_p_A;           /**< PI proportional term in Amps (nan outside a position-control run) */
    double pid_i_A;           /**< PI integrator in Amps (nan outside a position-control run) */
    double pid_output_A;      /**< Saturated PI output in Amps, commanded in the NEXT cycle (nan outside a position-control run) */
+   double position_filt_mm;  /**< Position the PI used: notched if POS_NOTCH_ENABLE, else raw (nan outside a position-control run) */
 } sample_log_entry_t;
 
 /** \brief Position controller values for one cycle, passed to log_sample() */
@@ -408,6 +424,7 @@ typedef struct
    double p_A;               /**< Kp * e_k in Amps */
    double i_A;               /**< Integrator after this cycle's update, in Amps */
    double output_A;          /**< Saturated P + I in Amps, sent to the drive in the next cycle */
+   double position_filt_mm;  /**< Position fed to the PI: notched if POS_NOTCH_ENABLE, else raw */
 } pid_log_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */

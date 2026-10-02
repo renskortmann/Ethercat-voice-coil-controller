@@ -298,6 +298,67 @@ clamp_abs(double x, double limit)
    return x;
 }
 
+#if POS_NOTCH_ENABLE
+/** \brief Position notch filter: biquad notch at POS_NOTCH_FREQ_HZ (RBJ cookbook, bilinear transform at
+ *  the cycle rate), Direct Form II transposed. DC gain is exactly 1, so a constant position passes
+ *  unchanged. */
+static struct
+{
+   double b0, b1, b2, a1, a2;   /**< Coefficients normalised to a0 = 1 */
+   double z1, z2;               /**< Filter state */
+   boolean seeded;              /**< FALSE until the first sample has set the state */
+} notch;
+
+/** \brief Compute the notch coefficients; call once before the cyclic loop */
+static void
+notch_init(void)
+{
+   const double fs_Hz = 1000.0 / CYCLE_TIME_MS;
+   double w0 = 2.0 * M_PI * POS_NOTCH_FREQ_HZ / fs_Hz;
+   double alpha = sin(w0) / (2.0 * POS_NOTCH_Q);
+   double a0 = 1.0 + alpha;
+   notch.b0 = 1.0 / a0;
+   notch.b1 = -2.0 * cos(w0) / a0;
+   notch.b2 = 1.0 / a0;
+   notch.a1 = -2.0 * cos(w0) / a0;
+   notch.a2 = (1.0 - alpha) / a0;
+   notch.seeded = FALSE;
+}
+
+/** \brief Set the state as if the input had been constant at x forever, so the output starts at x
+ *  without a transient */
+static void
+notch_seed(double x)
+{
+   notch.z2 = (notch.b2 - notch.a2) * x;
+   notch.z1 = (notch.b1 - notch.a1) * x + notch.z2;
+   notch.seeded = TRUE;
+}
+
+/** \brief Filter one position sample
+ *  \param x Raw position in mm
+ *  \return Notched position in mm
+ */
+static double
+notch_step(double x)
+{
+   if (!notch.seeded)
+   {
+      notch_seed(x);
+   }
+   double y = notch.b0 * x + notch.z1;
+   notch.z1 = notch.b1 * x - notch.a1 * y + notch.z2;
+   notch.z2 = notch.b2 * x - notch.a2 * y;
+   if (!isfinite(y))
+   {
+      /* Cannot happen with a valid int16 AI1 reading; restart from the raw sample. */
+      notch_seed(x);
+      y = x;
+   }
+   return y;
+}
+#endif
+
 /** \brief PI integrator in Amps. Starts at 0 and is only updated from t = 0, so the idle window
  *  leaves it at 0. */
 static double pi_integrator_A = 0.0;
@@ -443,7 +504,8 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 #if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
    double next_current_A = 0.0;   /* PI output from the previous cycle's measurement; 0 A until the first update */
    pid_log_t pid;                 /* this cycle's controller values, for the log */
-   double position_mm;
+   double position_mm;            /* raw, used by the trip check */
+   double position_filt_mm;       /* notched (POS_NOTCH_ENABLE) or raw, used by the PI */
    int pos_trip_count = 0;        /* consecutive cycles outside the trip window */
    boolean pos_trip_detected = FALSE;
    double pos_trip_position_mm = 0.0;
@@ -494,8 +556,15 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 #elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
    printf("\nExperiment: position PI, Kp = %.4f A/mm, Ki = %.4f A/(mm s), output limit +/-%.2f A (drive KP %.1f A)\n",
           PID_KP_A_PER_MM, PID_KI_A_PER_MM_S, PID_OUTPUT_LIMIT_A, fieldbus->kp_amps);
-   printf("  reference window %.1f .. %.1f mm, trip outside %.1f .. %.1f mm for %d cycles\n",
+   printf("  reference window %.1f .. %.1f mm, trip outside %.1f .. %.1f mm (raw position) for %d cycles\n",
           POS_REF_MIN_MM, POS_REF_MAX_MM, POS_TRIP_MIN_MM, POS_TRIP_MAX_MM, POS_TRIP_CYCLES);
+#if POS_NOTCH_ENABLE
+   printf("  position filter: notch at %.2f Hz, Q = %.2f (PI uses the notched position)\n",
+          POS_NOTCH_FREQ_HZ, POS_NOTCH_Q);
+   notch_init();
+#else
+   printf("  position filter: off (PI uses the raw position)\n");
+#endif
 #if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
    printf("  reference: absolute steps, last value held until t = %.2f s\n", RUN_DURATION_S);
    for (int i = 0; i < POS_REF_STEPS_N; i++)
@@ -601,8 +670,9 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       }
 
 #if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
-      /* Position from this cycle's exchange. Checked over the whole run, idle window included: a
-       * laser fault (signal lost reads about +29 mm) or a shaft outside the window stops the run. */
+      /* Raw position from this cycle's exchange. The trip checks it unfiltered over the whole run,
+       * idle window included: a laser fault (signal lost reads about +29 mm) or a shaft outside the
+       * window stops the run. */
       position_mm = ai1_raw_to_position_mm(tx->ai1_value);
       if (position_mm < POS_TRIP_MIN_MM || position_mm > POS_TRIP_MAX_MM)
       {
@@ -627,6 +697,13 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          pos_trip_count = 0;
       }
 
+      /* The notch runs from the first cycle, so it has settled long before the PI starts at t = 0. */
+#if POS_NOTCH_ENABLE
+      position_filt_mm = notch_step(position_mm);
+#else
+      position_filt_mm = position_mm;
+#endif
+
       if (elapsed_s < 0.0)
       {
          /* Bias idle window: controller off, 0 A, integrator stays 0. */
@@ -634,8 +711,9 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       }
       else
       {
-         pid = pi_update(pos_ref_mm(elapsed_s), position_mm);
+         pid = pi_update(pos_ref_mm(elapsed_s), position_filt_mm);
       }
+      pid.position_filt_mm = position_filt_mm;
       next_current_A = pid.output_A;
 #endif
 

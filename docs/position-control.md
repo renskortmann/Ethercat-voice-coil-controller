@@ -18,16 +18,18 @@ This document describes the system in terms of signals, timing and calculations.
  reference    ▲ −                                    loop (fast)      K_f       + damping       │
  generator    │                                                       ≈250 N/A                  │
               │                                                                                 │
-              │  y [mm]           AI1 [V]                                                       │
-              └──── V → mm  ◄──── drive analog ◄──── laser (ILD1220, 4–20 mA) ◄────────────────┘
-                  conversion       input 1
+              │ y_f [mm]          y [mm]           AI1 [V]                                      │
+              └──── 50 Hz ◄──┬─── V → mm  ◄──── drive analog ◄──── laser (ILD1220, 4–20 mA) ◄───┘
+                    notch    │    conversion     input 1
+                             └──► position trip (±10 mm, uses raw y)
 ```
 
 | Signal | Meaning | Unit |
 |---|---|---|
 | r | position reference, from the compile-time profile | mm |
-| y | measured position, from the laser | mm |
-| e = r − y | position error | mm |
+| y | measured position, from the laser (raw) | mm |
+| y_f | y with the 50 Hz mains hum removed; this is what the PI uses | mm |
+| e = r − y_f | position error | mm |
 | u | controller output = commanded coil current | A |
 | i | actual coil current, made by the drive's own current loop | A |
 | F = K_f · i | force on the mover | N |
@@ -49,7 +51,7 @@ The reference is fixed when you compile. It is an **absolute** position in the `
 Every cycle, from t = 0 on, with Δt = 0.5 ms:
 
 ```
-e  = r − y
+e  = r − y_f
 P  = Kp · e                       Kp = 0.02 A/mm
 I  = I + Ki · e · Δt              Ki = 0.2 A/(mm·s)
 u  = clamp(P + I, −10 A, +10 A)
@@ -59,6 +61,23 @@ u  = clamp(P + I, −10 A, +10 A)
 - **What I does.** I does the actual tracking. As long as any error remains, the integrator keeps building current: 1 mm of error held for 1 s adds 0.2 A. It stops only when the error is zero. That is why the steady-state error goes to zero even though Kp is tiny.
 - **Anti-windup.** When P + I would exceed ±10 A, the output is clamped. Without protection the integrator would keep growing during the clamp and then overshoot badly once the error reverses. The controller therefore skips any integrator step that would push further into saturation, and also limits I itself to ±10 A. With the default profile the output stays below 0.5 A, so this only matters if something goes wrong.
 - **No D term (yet).** The laser signal has noise and 50 Hz mains pickup on it. Differentiating it would turn that into current noise. A later D term should act on the measured position, not on the error, so that reference steps don't cause a kick. It also needs a low-pass filter.
+
+### Position filter (50 Hz notch)
+The laser position carries about 80 µm rms of noise. Most of it is mains hum: 95 µm amplitude at 49.98 Hz. It is just as large at 0 A in the idle window, so it is electrical pickup, not motion. The P term passes it straight into the coil current: about 25 mA at Kp = 0.3 and about 80 mA at Kp = 1.
+
+A notch removes one frequency and leaves the rest almost untouched. A low-pass would have to cut far below 50 Hz to remove the hum, and its lag at the loop frequency would destabilise the loop:
+
+| Filter | 50 Hz removed | Lag at 7 Hz | Lag at 12 Hz |
+|---|---|---|---|
+| Low-pass 60 Hz | −2 dB only | 7° | 11° |
+| Low-pass 5 Hz | −20 dB | 54° (unstable) | — |
+| **Notch 50 Hz, Q = 10 (used)** | completely; −34 dB at ±0.05 Hz mains drift | **0.8°** | **1.5°** |
+
+- **What the filter is.** A standard second-order (biquad) notch: centre 50 Hz, −3 dB width 5 Hz. It passes constant positions exactly. It runs from the first cycle of the idle window and is seeded with the first sample, so it has settled long before the PI starts.
+- **Result on real data.** Replaying the 2 Oct 15:32 run: noise drops from 80 to 42 µm rms, and the 50 Hz part from about 95 to 2–4 µm.
+- **What remains.** About 42 µm of other noise, including a 150 Hz harmonic of about 50 µm amplitude that was deliberately left in.
+- **Why Q = 10 and not lower.** A wider notch (lower Q) adds more lag. At high Kp the loop has little phase margin near its 10–12 Hz mode, so every degree counts. In simulation at Kp = 1.0 with the lowest damping estimate, Q = 5 made the loop unstable, while Q = 10 and no notch both stayed stable. If you push Kp higher, watch for ringing at 10–15 Hz. `POS_NOTCH_ENABLE` 0 switches the notch off for a direct comparison.
+- **The trip ignores the filter.** The ±10 mm position trip always checks the **raw** position, so a filter can never delay it.
 
 ### Drive and plant
 - **Drive.** The drive (AMC, CST mode) has its own fast current loop. Here it is treated as ideal: the actual current equals the command. Measured: a 3.0 A command gives 2.995 A.
@@ -85,10 +104,12 @@ The PC runs one real-time loop on a dedicated CPU core, woken every 0.5 ms by an
    │      └─ drive returns its latest inputs: AI1 (laser), currents, ...  │
    ├─ 3. communication checks (working counter, drive state)              │
    ├─ 4. AI1 raw → volts → y(k) in mm                                     │
-   ├─ 5. position trip check on y(k)                                      │
-   ├─ 6. r(k) = reference at this time; PI → u(k), stored for next cycle  │
-   ├─ 7. timing measurement, then log one row (y(k), r(k), P, I, u(k))    │
-   └─ 8. sleep ──────────────────────────────────────────────────────────►├─ 1. write u(k) ...
+   ├─ 5. position trip check on the raw y(k)                              │
+   ├─ 6. 50 Hz notch: y(k) → y_f(k)  (runs in the idle window too)        │
+   ├─ 7. r(k) = reference at this time; PI on y_f(k) → u(k), stored for   │
+   │     the next cycle                                                   │
+   ├─ 8. timing measurement, then log one row (y, y_f, r, P, I, u)        │
+   └─ 9. sleep ──────────────────────────────────────────────────────────►├─ 1. write u(k) ...
 ```
 
 - **The measurement and the action are one cycle apart.** The position received in cycle k is used to compute u(k). That current goes to the drive at the start of cycle k+1, 0.5 ms later. Add the drive's internal input sampling and current-loop response, and the total delay from measurement to force is roughly 1 ms.
@@ -196,7 +217,7 @@ The 3-cycle confirmation keeps a single noise spike from stopping the run. 1.5 m
 
 ## 8. Reading the log
 
-The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0.0mm-8.0s1.0mm-17.0s-1.0mm-26.0s0.0mm-r0.0s_kp0.02_ki0.2_<date>_<time>.csv`. It has four new columns at the end (all other modes write `nan` in them):
+The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0.0mm-8.0s1.0mm-17.0s-1.0mm-26.0s0.0mm-r0.0s_kp0.02_ki0.2_notch50.0Hz_Q10.0_<date>_<time>.csv` (the `_notch...` part only when the notch is on). It has five new columns at the end (all other modes write `nan` in them):
 
 | Column | Meaning |
 |---|---|
@@ -204,10 +225,11 @@ The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0
 | `pid_p_A` | P term |
 | `pid_i_A` | integrator after this cycle's update |
 | `pid_output_A` | u(k), the clamped output. **Sent to the drive in the next cycle.** `target_current_A` (the drive's echo) shows it a row or two later. |
+| `position_filt_mm` | y_f(k), the position the PI used: notched if `POS_NOTCH_ENABLE` is 1, otherwise equal to `position_mm` |
 
-`position_mm` in the same row is the y(k) the controller used. Tracking error = `position_ref_mm − position_mm`.
+`position_filt_mm` in the same row is the y_f(k) the controller used, and `position_mm` is the raw measurement. Tracking error as the PI saw it = `position_ref_mm − position_filt_mm`.
 
-`scripts/plot_voice_coil_log.py` draws the reference over the measured position, and the PI output on the current plot.
+`scripts/plot_voice_coil_log_ref_track.py` plots tracking: the raw position, the position the PI used and the reference; the PI output with its P and I terms; and the tracking error as the PI saw it. Run it with `--preview` to plot the reference programmed in `main.h` before a run. `scripts/plot_voice_coil_log.py` also draws the reference over the measured position.
 
 ## 9. Where to change things
 
@@ -225,4 +247,5 @@ All settings are `#define`s in `main.h`. Rebuild after changing them.
 | Output current limit | `PID_OUTPUT_LIMIT_A` |
 | Allowed reference range | `POS_REF_MIN_MM`, `POS_REF_MAX_MM` |
 | Trip window and confirmation | `POS_TRIP_MIN_MM`, `POS_TRIP_MAX_MM`, `POS_TRIP_CYCLES` |
+| Position notch on/off, frequency, width | `POS_NOTCH_ENABLE`, `POS_NOTCH_FREQ_HZ`, `POS_NOTCH_Q` |
 | Laser calibration | `AI1_MM_SCALE`, `AI1_MM_OFFSET`, `AI1_CENTRE_MM`, `AI1_POSITION_SIGN` |
