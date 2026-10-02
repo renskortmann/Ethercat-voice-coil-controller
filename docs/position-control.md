@@ -62,7 +62,9 @@ u  = clamp(P + I, −10 A, +10 A)
 - **Anti-windup.** When P + I would exceed ±10 A, the output is clamped. Without protection the integrator would keep growing during the clamp and then overshoot badly once the error reverses. The controller therefore skips any integrator step that would push further into saturation, and also limits I itself to ±10 A. With the default profile the output stays below 0.5 A, so this only matters if something goes wrong.
 - **No D term (yet).** The laser signal has noise and 50 Hz mains pickup on it. Differentiating it would turn that into current noise. A later D term should act on the measured position, not on the error, so that reference steps don't cause a kick. It also needs a low-pass filter.
 
-### Position filter (50 Hz notch)
+### Position filter (50 Hz notch) — currently OFF
+**Status:** the notch is switched off (`POS_NOTCH_ENABLE 0`), so the PI uses the raw position. The notch hides *real* 50 Hz motion from the PI as well as the pickup. That matters for sine references between about 40 and 60 Hz, where it removes or distorts the feedback. The code is kept; set `POS_NOTCH_ENABLE 1` to use it again for references well below 40 Hz. Measured at Kp = 1.0, 5 mm / 1 Hz sine: on vs off gave the same tracking (0.86 vs 0.87 mm rms error), with 50 Hz in the current at 1 vs 83 mA and current noise at 45 vs 80 mA rms.
+
 The laser position carries about 80 µm rms of noise. Most of it is mains hum: 95 µm amplitude at 49.98 Hz. It is just as large at 0 A in the idle window, so it is electrical pickup, not motion. The P term passes it straight into the coil current: about 25 mA at Kp = 0.3 and about 80 mA at Kp = 1.
 
 A notch removes one frequency and leaves the rest almost untouched. A low-pass would have to cut far below 50 Hz to remove the hum, and its lag at the loop frequency would destabilise the loop:
@@ -71,7 +73,7 @@ A notch removes one frequency and leaves the rest almost untouched. A low-pass w
 |---|---|---|---|
 | Low-pass 60 Hz | −2 dB only | 7° | 11° |
 | Low-pass 5 Hz | −20 dB | 54° (unstable) | — |
-| **Notch 50 Hz, Q = 10 (used)** | completely; −34 dB at ±0.05 Hz mains drift | **0.8°** | **1.5°** |
+| **Notch 50 Hz, Q = 10 (implemented)** | completely; −34 dB at ±0.05 Hz mains drift | **0.8°** | **1.5°** |
 
 - **What the filter is.** A standard second-order (biquad) notch: centre 50 Hz, −3 dB width 5 Hz. It passes constant positions exactly. It runs from the first cycle of the idle window and is seeded with the first sample, so it has settled long before the PI starts.
 - **Result on real data.** Replaying the 2 Oct 15:32 run: noise drops from 80 to 42 µm rms, and the 50 Hz part from about 95 to 2–4 µm.

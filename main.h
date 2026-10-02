@@ -178,7 +178,7 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 /** Notch filter on the position the PI uses, against 50 Hz mains pickup on the laser signal. A notch
  *  instead of a low-pass: it removes 50 Hz with only ~1.5 deg lag at the 7-12 Hz loop frequencies. The
  *  position trip always uses the raw, unfiltered position. See docs/position-control.md. */
-#define POS_NOTCH_ENABLE    1     /**< 1 = PI uses the notched position, 0 = PI uses the raw position */
+#define POS_NOTCH_ENABLE    0     /**< 1 = PI uses the notched position, 0 = PI uses the raw position */
 #define POS_NOTCH_FREQ_HZ   50.0  /**< Notch centre frequency in Hz (mains) */
 #define POS_NOTCH_Q         10.0  /**< Notch quality factor: -3 dB width = POS_NOTCH_FREQ_HZ / POS_NOTCH_Q. Higher Q = less lag at the loop frequency (Q 5 can destabilise Kp ~1 A/mm if damping is low) */
 #if POS_NOTCH_ENABLE
