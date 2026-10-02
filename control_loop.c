@@ -31,6 +31,31 @@ timespec_diff_us(const struct timespec *end, const struct timespec *start)
           (double)(end->tv_nsec - start->tv_nsec) / 1000.0;
 }
 
+/** \brief Largest raw target current magnitude. Symmetric on purpose: +32768 does not fit the int16_t
+ *  RxPDO field and would wrap to -32768, i.e. a full positive command reaching the drive as full reverse. */
+#define TARGET_CURRENT_RAW_MAX 32767.0
+
+/** \brief Convert a target current in Amps to the raw RxPDO value (6071h, scale 2^15 / KP)
+ *  Every step is done in double and clamped before the one integer conversion, so the result is
+ *  always in range: no int16 wrap, and no undefined behaviour from converting NaN, inf or an
+ *  out-of-range double to an integer.
+ *  \param amps Target current in Amps
+ *  \param kp_amps Drive peak current (KP); 0 if the SDO read at startup failed
+ *  \return Raw value in [-32767, 32767] (+/-KP); 0 if amps is not finite or kp_amps is not > 0
+ */
+static int16_t
+amps_to_target_current_raw(double amps, double kp_amps)
+{
+   if (!isfinite(amps) || !(kp_amps > 0.0))
+   {
+      return 0;
+   }
+   double raw = amps * DC2_SCALE / kp_amps;
+   if (raw > TARGET_CURRENT_RAW_MAX) raw = TARGET_CURRENT_RAW_MAX;
+   if (raw < -TARGET_CURRENT_RAW_MAX) raw = -TARGET_CURRENT_RAW_MAX;
+   return (int16_t)lround(raw);
+}
+
 #if EXPERIMENT_MODE == EXPERIMENT_CHIRP || EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
 /** \brief Unit-amplitude exponential chirp CHIRP_F0_HZ -> CHIRP_F1_HZ over CHIRP_DURATION_S
  *  \param t Time since the start of the sweep in seconds (0 <= t < CHIRP_DURATION_S)
@@ -176,6 +201,147 @@ sine_blocks_check(double kp_amps)
 }
 #endif
 
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+#if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
+/** \brief Reference breakpoints from POS_REF_STEPS_TABLE, validated by pos_ref_check() */
+static const struct
+{
+   double t_s;      /**< Time the ramp to pos_mm starts, in seconds */
+   double pos_mm;   /**< Reference after the ramp, in mm */
+} pos_ref_steps[] = POS_REF_STEPS_TABLE;
+#define POS_REF_STEPS_N ((int)(sizeof(pos_ref_steps) / sizeof(pos_ref_steps[0])))
+#endif
+
+/** \brief Position reference at time t
+ *  \param t Time since the controller started in seconds (t >= 0)
+ *  \return Reference position in mm (absolute position_mm frame)
+ */
+static double
+pos_ref_mm(double t)
+{
+#if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
+   /* Same breakpoint semantics as chirp_sched_amplitude_A(): last breakpoint at or before t,
+    * ramped in linearly from the previous value; the last value holds to the end of the run. */
+   int i = 0;
+   while (i + 1 < POS_REF_STEPS_N && pos_ref_steps[i + 1].t_s <= t)
+   {
+      i++;
+   }
+   double into_ramp_s = t - pos_ref_steps[i].t_s;
+   if (i > 0 && POS_REF_RAMP_S > 0.0 && into_ramp_s < POS_REF_RAMP_S)
+   {
+      double prev_mm = pos_ref_steps[i - 1].pos_mm;
+      return prev_mm + (pos_ref_steps[i].pos_mm - prev_mm) * (into_ramp_s / POS_REF_RAMP_S);
+   }
+   return pos_ref_steps[i].pos_mm;
+#else
+   return POS_REF_SINE_OFFSET_MM + POS_REF_SINE_AMPLITUDE_MM * sin(2.0 * M_PI * POS_REF_SINE_FREQ_HZ * t);
+#endif
+}
+
+/** \brief Check the controller settings before the run (doubles rule out some _Static_asserts)
+ *  \param kp_amps Drive peak current; the PI output limit must stay below it
+ *  \return TRUE if usable, FALSE (with a message printed) otherwise
+ */
+static boolean
+pos_ref_check(double kp_amps)
+{
+   if (!(kp_amps > 0.0))
+   {
+      printf("POSITION PID: drive peak current KP not read (%.1f A); refusing to run\n", kp_amps);
+      return FALSE;
+   }
+   if (PID_OUTPUT_LIMIT_A >= kp_amps)
+   {
+      printf("POSITION PID: PID_OUTPUT_LIMIT_A %.2f A is not below the drive peak current %.1f A\n",
+             PID_OUTPUT_LIMIT_A, kp_amps);
+      return FALSE;
+   }
+#if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
+   if (pos_ref_steps[0].t_s != 0.0)
+   {
+      printf("POS_REF_STEPS: first breakpoint must be at t = 0 s (is %.3f s)\n", pos_ref_steps[0].t_s);
+      return FALSE;
+   }
+   for (int i = 0; i < POS_REF_STEPS_N; i++)
+   {
+      if (pos_ref_steps[i].pos_mm < POS_REF_MIN_MM || pos_ref_steps[i].pos_mm > POS_REF_MAX_MM)
+      {
+         printf("POS_REF_STEPS: %.3f mm at t = %.3f s is outside %.1f .. %.1f mm\n",
+                pos_ref_steps[i].pos_mm, pos_ref_steps[i].t_s, POS_REF_MIN_MM, POS_REF_MAX_MM);
+         return FALSE;
+      }
+      if (pos_ref_steps[i].t_s >= RUN_DURATION_S)
+      {
+         printf("POS_REF_STEPS: breakpoint at t = %.3f s is not before RUN_DURATION_S (%.1f s)\n",
+                pos_ref_steps[i].t_s, RUN_DURATION_S);
+         return FALSE;
+      }
+      if (i > 0 && pos_ref_steps[i].t_s < pos_ref_steps[i - 1].t_s + POS_REF_RAMP_S)
+      {
+         printf("POS_REF_STEPS: breakpoint at t = %.3f s starts before the ramp at t = %.3f s ends "
+                "(times must increase by at least POS_REF_RAMP_S = %.3f s)\n",
+                pos_ref_steps[i].t_s, pos_ref_steps[i - 1].t_s, POS_REF_RAMP_S);
+         return FALSE;
+      }
+   }
+#endif
+   return TRUE;
+}
+
+/** \brief Clamp x to [-limit, limit] (NaN passes through; callers check isfinite) */
+static double
+clamp_abs(double x, double limit)
+{
+   if (x > limit) return limit;
+   if (x < -limit) return -limit;
+   return x;
+}
+
+/** \brief PI integrator in Amps. Starts at 0 and is only updated from t = 0, so the idle window
+ *  leaves it at 0. */
+static double pi_integrator_A = 0.0;
+
+/** \brief One PI update: e = r - y, P = Kp e, I += Ki e dt, u = sat(P + I)
+ *  Anti-windup by conditional integration: while P + I is beyond the output limit, integrator steps
+ *  that would push it further out are dropped. The integrator is also clamped to the output limit.
+ *  A non-finite input or result (which a valid AI1 reading cannot produce) gives 0 A.
+ *  \param r_mm Reference position in mm
+ *  \param y_mm Measured position in mm (from this cycle's PDO exchange)
+ *  \return Reference, P, I and the saturated output; output_A is sent to the drive next cycle
+ */
+static pid_log_t
+pi_update(double r_mm, double y_mm)
+{
+   const double dt_s = CYCLE_TIME_MS / 1000.0;
+   if (!isfinite(r_mm) || !isfinite(y_mm))
+   {
+      /* Cannot happen with a valid int16 AI1 reading; command 0 A and leave the integrator alone. */
+      return (pid_log_t){ .position_ref_mm = r_mm, .p_A = 0.0, .i_A = pi_integrator_A, .output_A = 0.0 };
+   }
+   double e_mm = r_mm - y_mm;
+   double p_A = PID_KP_A_PER_MM * e_mm;
+   double i_A = pi_integrator_A + PID_KI_A_PER_MM_S * e_mm * dt_s;
+   double unsat_A = p_A + i_A;
+   if ((unsat_A > PID_OUTPUT_LIMIT_A && e_mm > 0.0) || (unsat_A < -PID_OUTPUT_LIMIT_A && e_mm < 0.0))
+   {
+      i_A = pi_integrator_A;                                 /* saturated: hold the integrator */
+   }
+   i_A = clamp_abs(i_A, PID_OUTPUT_LIMIT_A);
+   if (!isfinite(i_A))
+   {
+      i_A = 0.0;
+   }
+   pi_integrator_A = i_A;
+
+   double u_A = clamp_abs(p_A + i_A, PID_OUTPUT_LIMIT_A);
+   if (!isfinite(u_A))
+   {
+      u_A = 0.0;
+   }
+   return (pid_log_t){ .position_ref_mm = r_mm, .p_A = p_A, .i_A = i_A, .output_A = u_A };
+}
+#else
 /** \brief Target current for this cycle, in Amps, for the experiment selected by EXPERIMENT_MODE
  *  This is the only experiment-specific code in the cyclic loop. It must stay cheap and
  *  allocation-free: it runs once per cycle inside the real-time loop.
@@ -235,6 +401,7 @@ experiment_target_current_A(double elapsed_s)
 #error "Unknown EXPERIMENT_MODE"
 #endif
 }
+#endif /* EXPERIMENT_MODE == EXPERIMENT_POSITION_PID */
 
 /** \brief Run the real-time control loop: generate experiment setpoints, exchange PDO, monitor faults
  *  Operates for BIAS_IDLE_S (0 A, t < 0) + RUN_DURATION_S seconds at CYCLE_TIME_MS intervals, synchronized via DC SYNC0.
@@ -260,7 +427,6 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    int64_t cycle_ns = (int64_t)(CYCLE_TIME_MS * 1000000);
    double elapsed_s = -BIAS_IDLE_S;  /* negative during the bias idle window; 0 = experiment start */
    double target_current_A;
-   int32_t target_current_raw;
    double cycle_jitter_us;
    double pdo_exchange_us;
    double max_pdo_exchange_us = 0.0;
@@ -274,6 +440,14 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    boolean state_drift_detected = FALSE;
    int missed_deadline_count = 0;
    double max_jitter_us = 0.0;
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+   double next_current_A = 0.0;   /* PI output from the previous cycle's measurement; 0 A until the first update */
+   pid_log_t pid;                 /* this cycle's controller values, for the log */
+   double position_mm;
+   int pos_trip_count = 0;        /* consecutive cycles outside the trip window */
+   boolean pos_trip_detected = FALSE;
+   double pos_trip_position_mm = 0.0;
+#endif
 
 #if EXPERIMENT_MODE == EXPERIMENT_SINE
    printf("\nExperiment: sine, %.1f Hz, %.2f A amplitude\n", SINE_FREQ_HZ, SINE_AMPLITUDE_A);
@@ -317,6 +491,30 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    }
 #elif EXPERIMENT_MODE == EXPERIMENT_NOISE
    printf("\nExperiment: noise, 0 A with the drive enabled for %.2f s\n", RUN_DURATION_S);
+#elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+   printf("\nExperiment: position PI, Kp = %.4f A/mm, Ki = %.4f A/(mm s), output limit +/-%.2f A (drive KP %.1f A)\n",
+          PID_KP_A_PER_MM, PID_KI_A_PER_MM_S, PID_OUTPUT_LIMIT_A, fieldbus->kp_amps);
+   printf("  reference window %.1f .. %.1f mm, trip outside %.1f .. %.1f mm for %d cycles\n",
+          POS_REF_MIN_MM, POS_REF_MAX_MM, POS_TRIP_MIN_MM, POS_TRIP_MAX_MM, POS_TRIP_CYCLES);
+#if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
+   printf("  reference: absolute steps, last value held until t = %.2f s\n", RUN_DURATION_S);
+   for (int i = 0; i < POS_REF_STEPS_N; i++)
+   {
+      printf("  t = %7.2f s -> %+.3f mm%s\n", pos_ref_steps[i].t_s, pos_ref_steps[i].pos_mm,
+             i > 0 && POS_REF_RAMP_S > 0.0 ? " (linear ramp)" : "");
+   }
+   if (POS_REF_RAMP_S > 0.0)
+   {
+      printf("  ramp time %.2f s\n", POS_REF_RAMP_S);
+   }
+#else
+   printf("  reference: absolute sine, %+.3f mm + %.3f mm * sin(2 pi %.3f Hz t)\n",
+          POS_REF_SINE_OFFSET_MM, POS_REF_SINE_AMPLITUDE_MM, POS_REF_SINE_FREQ_HZ);
+#endif
+   if (!pos_ref_check(fieldbus->kp_amps))
+   {
+      return FALSE;
+   }
 #endif
    printf("Bias window: %.1f s at 0 A before the experiment (t < 0) to measure the accelerometer offset\n",
           BIAS_IDLE_S);
@@ -340,6 +538,12 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       /* Bias idle window (t < 0): hold 0 A with the drive enabled, so the accelerometer offset is
        * measured in the same electrical conditions as the run. The experiment functions only ever
        * see t >= 0 (PRBS derives its bit index from elapsed_s and assumes it is non-negative). */
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+      /* Closed loop: send the PI output computed at the end of the previous cycle from the position
+       * received then. The PI runs right after the exchange below, so measurement, trip check, PI
+       * and log row all use the same received position. */
+      target_current_A = next_current_A;
+#else
       if (elapsed_s < 0.0)
       {
          target_current_A = 0.0;
@@ -348,13 +552,9 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       {
          target_current_A = experiment_target_current_A(elapsed_s);
       }
+#endif
 
-      /* Convert to raw Int32 (scale: 2^15 / KP) */
-      target_current_raw = (int32_t)round((target_current_A * DC2_SCALE) / fieldbus->kp_amps);
-      if (target_current_raw > DC2_SCALE) target_current_raw = DC2_SCALE;  /* Saturate to max DC2 */
-      if (target_current_raw < -DC2_SCALE) target_current_raw = -DC2_SCALE;  /* Saturate to min -DC2 */
-
-      rx->target_current = target_current_raw;
+      rx->target_current = amps_to_target_current_raw(target_current_A, fieldbus->kp_amps);
 
       /* Send and receive process data. Time this separately from the rest of the cycle:
        * it's the frame round-trip (NIC driver + wire + slave + housekeeping-core IRQ servicing), so a
@@ -400,6 +600,45 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          break;
       }
 
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+      /* Position from this cycle's exchange. Checked over the whole run, idle window included: a
+       * laser fault (signal lost reads about +29 mm) or a shaft outside the window stops the run. */
+      position_mm = ai1_raw_to_position_mm(tx->ai1_value);
+      if (position_mm < POS_TRIP_MIN_MM || position_mm > POS_TRIP_MAX_MM)
+      {
+         pos_trip_count++;
+         if (pos_trip_count >= POS_TRIP_CYCLES)
+         {
+            rx->target_current = 0;
+            rx->controlword = CTRL_DISABLE_VOLT;
+            /* Send it now: after the loop come printouts and SDO diagnostics, during which the
+             * drive would otherwise keep applying the last commanded current. */
+            fieldbus_roundtrip(fieldbus);
+            log_fault(fieldbus, elapsed_s, FAULT_POSITION_LIMIT, (uint32_t)pos_trip_count,
+                      RECOVERY_SHUTDOWN_INITIATED);
+            fault_detected = TRUE;
+            pos_trip_detected = TRUE;
+            pos_trip_position_mm = position_mm;
+            break;
+         }
+      }
+      else
+      {
+         pos_trip_count = 0;
+      }
+
+      if (elapsed_s < 0.0)
+      {
+         /* Bias idle window: controller off, 0 A, integrator stays 0. */
+         pid = (pid_log_t){ .position_ref_mm = NAN, .p_A = 0.0, .i_A = 0.0, .output_A = 0.0 };
+      }
+      else
+      {
+         pid = pi_update(pos_ref_mm(elapsed_s), position_mm);
+      }
+      next_current_A = pid.output_A;
+#endif
+
       /* Measure cycle timing jitter (actual time vs. scheduled deadline) before logging the
        * sample, so it's captured in the same row instead of being printed live. */
       clock_gettime(CLOCK_MONOTONIC, &now);
@@ -414,7 +653,11 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       }
 
       /* Log sample */
-      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us);
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us, &pid);
+#else
+      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us, NULL);
+#endif
 
       /* Wait for next cycle using absolute-time sleep */
       if (cycle_jitter_us <= 0.0)
@@ -436,6 +679,14 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       printf("ERROR: Drive dropped out of OPERATION_ENABLED state (0x%04X), initiating shutdown\n",
              state_drift_statusword);
    }
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+   if (pos_trip_detected)
+   {
+      printf("ERROR: POSITION TRIP at t = %.3f s: position %+.3f mm outside %.1f .. %.1f mm for %d cycles, "
+             "0 A and voltage disabled\n",
+             elapsed_s, pos_trip_position_mm, POS_TRIP_MIN_MM, POS_TRIP_MAX_MM, POS_TRIP_CYCLES);
+   }
+#endif
    printf("Cyclic loop finished. Samples: %d, Faults: %d, missed deadlines: %d "
           "(max jitter %.1f us, max PDO exchange %.1f us)\n",
           fieldbus->sample_count, fieldbus->fault_count, missed_deadline_count,

@@ -27,7 +27,7 @@
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
-#define RUN_DURATION_S      128.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
+#define RUN_DURATION_S      36.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
 /** 0 A rest period before the experiment starts, used to measure the accelerometer (AI2) bias.
  *  Timestamps are shifted so this window has negative time (-BIAS_IDLE_S .. 0) and the excitation
  *  still starts at t = 0. Total loop time is BIAS_IDLE_S + RUN_DURATION_S. export_csv() subtracts
@@ -44,7 +44,8 @@
 #define EXPERIMENT_CHIRP_SCHEDULED 4 /**< Same sweep as EXPERIMENT_CHIRP, amplitude follows CHIRP_SCHED */
 #define EXPERIMENT_NOISE         5   /**< 0 A for the whole run with the drive enabled: sensor noise floor */
 #define EXPERIMENT_SINE_BLOCKS   6   /**< Sequence of ramped constant-frequency sine blocks from SINE_BLOCKS */
-#define EXPERIMENT_MODE          EXPERIMENT_SINE_BLOCKS /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+#define EXPERIMENT_POSITION_PID  7   /**< Closed-loop position control: PI on the AI1 laser position tracks POS_REF_* */
+#define EXPERIMENT_MODE          EXPERIMENT_POSITION_PID /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
 
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
@@ -146,6 +147,65 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
                "PRBS_BANDWIDTH_HZ must not exceed 60 Hz");
 #endif
 
+/** \brief Position control parameters (EXPERIMENT_POSITION_PID). A PI controller on the AI1 laser
+ *  position drives the coil current so position_mm follows a compile-time reference. The reference is
+ *  absolute position_mm (0 = AI1_CENTRE_MM), not an offset from where the shaft rests, so at t = 0 the
+ *  loop pulls the shaft from rest to the first reference value. During the BIAS_IDLE_S window the
+ *  output is 0 A and the integrator is held at 0. See docs/position-control.md.
+ *  Write the numbers with a decimal point (1.0, not 1): they are copied verbatim into the file name. */
+#define POS_REF_SHAPE_STEPS 0    /**< Breakpoints from POS_REF_STEPS, linearly ramped over POS_REF_RAMP_S */
+#define POS_REF_SHAPE_SINE  1    /**< POS_REF_SINE_OFFSET_MM + POS_REF_SINE_AMPLITUDE_MM * sin(2 pi f t) */
+#define POS_REF_SHAPE       POS_REF_SHAPE_STEPS
+/** X(time_s, position_mm) breakpoints: at time_s the reference ramps linearly from the previous value
+ *  to position_mm over POS_REF_RAMP_S, then holds; the last value is held until RUN_DURATION_S. One
+ *  entry gives a constant setpoint. The first entry must be at t = 0 (the starting reference, no
+ *  ramp-in) and each ramp must end before the next breakpoint. */
+#define POS_REF_STEPS(X)    X(0.0, 0.0) X(8.0, 1.0) X(17.0, -1.0) X(26.0, 0.0)
+#define POS_REF_RAMP_S      1.0   /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
+#define POS_REF_SINE_OFFSET_MM    0.0   /**< Sine reference centre, in mm */
+#define POS_REF_SINE_AMPLITUDE_MM 1.0   /**< Sine reference amplitude, in mm */
+#define POS_REF_SINE_FREQ_HZ      0.2   /**< Sine reference frequency, in Hz */
+#define PID_KP_A_PER_MM     0.02  /**< Proportional gain: Amps per mm of position error */
+#define PID_KI_A_PER_MM_S   0.2   /**< Integral gain: Amps per mm of error per second */
+/* No D term yet: the laser signal carries noise and 50 Hz pickup. A later D term should act on the
+ * measurement (not the error, to avoid a kick on reference steps) through a first-order low-pass. */
+#define PID_OUTPUT_LIMIT_A  10.0  /**< Controller output saturation, +/- Amps; must be below the drive peak current */
+#define POS_REF_MIN_MM      -8.0  /**< Lowest reference allowed by the startup check, in mm */
+#define POS_REF_MAX_MM      8.0   /**< Highest reference allowed by the startup check, in mm */
+#define POS_TRIP_MIN_MM     -10.0 /**< Runtime trip: 0 A and shut down below this position, in mm */
+#define POS_TRIP_MAX_MM     10.0  /**< Runtime trip: 0 A and shut down above this position, in mm */
+#define POS_TRIP_CYCLES     3     /**< Consecutive cycles outside the trip window before tripping (rejects single noise spikes) */
+/** \brief Breakpoint table and file-name label, both generated from POS_REF_STEPS. The label is
+ *  e.g. "0.0s0.0mm-8.0s1.0mm-": each breakpoint as <time>s<position>mm. */
+#define POS_REF_STEPS_ENTRY_(t, p)  {t, p},
+#define POS_REF_STEPS_TABLE         { POS_REF_STEPS(POS_REF_STEPS_ENTRY_) }
+#define POS_REF_STEPS_LABEL_(t, p)  STRINGIFY(t) "s" STRINGIFY(p) "mm-"
+#define POS_REF_STEPS_NAME          POS_REF_STEPS(POS_REF_STEPS_LABEL_)
+#define POS_REF_IN_WINDOW_(t, p)    && (int)((p) * 1000) >= (int)(POS_REF_MIN_MM * 1000) \
+                                    && (int)((p) * 1000) <= (int)(POS_REF_MAX_MM * 1000)
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+_Static_assert((int)(POS_TRIP_MIN_MM * 1000) <= (int)(POS_REF_MIN_MM * 1000) &&
+               (int)(POS_REF_MAX_MM * 1000) <= (int)(POS_TRIP_MAX_MM * 1000),
+               "POS_REF_MIN/MAX_MM must lie inside the POS_TRIP_MIN/MAX_MM window");
+_Static_assert((int)(PID_OUTPUT_LIMIT_A * 1000) > 0, "PID_OUTPUT_LIMIT_A must be > 0");
+_Static_assert((int)(PID_KP_A_PER_MM * 1e6) >= 0 && (int)(PID_KI_A_PER_MM_S * 1e6) >= 0,
+               "PID gains must be >= 0 (a negative gain is positive feedback)");
+_Static_assert(POS_TRIP_CYCLES >= 1, "POS_TRIP_CYCLES must be >= 1");
+#if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
+_Static_assert(1 POS_REF_STEPS(POS_REF_IN_WINDOW_),
+               "POS_REF_STEPS position outside POS_REF_MIN_MM .. POS_REF_MAX_MM");
+#elif POS_REF_SHAPE == POS_REF_SHAPE_SINE
+_Static_assert((int)((POS_REF_SINE_OFFSET_MM - POS_REF_SINE_AMPLITUDE_MM) * 1000) >= (int)(POS_REF_MIN_MM * 1000) &&
+               (int)((POS_REF_SINE_OFFSET_MM + POS_REF_SINE_AMPLITUDE_MM) * 1000) <= (int)(POS_REF_MAX_MM * 1000),
+               "POS_REF_SINE offset +/- amplitude outside POS_REF_MIN_MM .. POS_REF_MAX_MM");
+_Static_assert((int)(POS_REF_SINE_FREQ_HZ * 1000) > 0 && (int)(POS_REF_SINE_FREQ_HZ * CYCLE_TIME_MS) <= 100,
+               "POS_REF_SINE_FREQ_HZ must be > 0 and give at least 10 samples per period");
+#else
+#error "Unknown POS_REF_SHAPE"
+#endif
+#endif
+
+
 /** \brief Stringize a macro's expanded value (two levels so the argument is expanded first) */
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x)  STRINGIFY_(x)
@@ -168,6 +228,13 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
                        STRINGIFY(SINE_BLOCK_HOLD_S) "s_p" STRINGIFY(SINE_BLOCK_PAUSE_S) "s"
 #elif EXPERIMENT_MODE == EXPERIMENT_NOISE
 #define EXPERIMENT_TAG "noise_0A_" STRINGIFY(RUN_DURATION_S) "s"
+#elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_STEPS
+#define EXPERIMENT_TAG "posPI_steps_" POS_REF_STEPS_NAME "r" STRINGIFY(POS_REF_RAMP_S) "s_kp" \
+                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S)
+#elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_SINE
+#define EXPERIMENT_TAG "posPI_sine_" STRINGIFY(POS_REF_SINE_OFFSET_MM) "mm_" \
+                       STRINGIFY(POS_REF_SINE_AMPLITUDE_MM) "mm_" STRINGIFY(POS_REF_SINE_FREQ_HZ) "Hz_kp" \
+                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S)
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
 #define EXPERIMENT_TAG "prbs_" STRINGIFY(PRBS_AMPLITUDE_A) "A_" STRINGIFY(PRBS_BANDWIDTH_HZ) "Hz_" \
                        STRINGIFY(PRBS_DURATION_S) "s"
@@ -217,6 +284,15 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #define AI1_MM_OFFSET      22.5
 #define AI1_CENTRE_MM      51.7    // Laser distance with the shaft at rest
 #define AI1_POSITION_SIGN  -1.0    // -1
+
+/** \brief Shaft position in mm from a raw AI1 PDO value (DAI units -> volts -> mm, calibration above).
+ *  The single conversion used by both the position controller and the CSV log, so they cannot disagree. */
+static inline double
+ai1_raw_to_position_mm(int16_t ai1_raw)
+{
+   double ai1_V = ai1_raw / DAI_SCALE;
+   return AI1_POSITION_SIGN * (AI1_MM_SCALE * ai1_V + AI1_MM_OFFSET - AI1_CENTRE_MM);
+}
 
 // PDO object indices for CiA402 current control
 #define ACTUAL_CURRENT_INDEX           0x6077    // Actual current (DC1) in 16-bit signed integer format
@@ -283,7 +359,8 @@ typedef enum
    FAULT_WKC_ERROR = 0,            /**< Working Counter validation failure */
    FAULT_ALstatuscode_CHANGE = 1,  /**< Drive reported non-zero ALstatuscode (reserved for expansion) */
    FAULT_STATE_DRIFT = 2,          /**< Unexpected CiA402 state transition detected */
-   FAULT_DRIVE_STATUS_FLAG = 3     /**< Drive status flags (2002h) indicate fault condition */
+   FAULT_DRIVE_STATUS_FLAG = 3,    /**< Drive status flags (2002h) indicate fault condition */
+   FAULT_POSITION_LIMIT = 4        /**< position_mm outside POS_TRIP_MIN/MAX_MM for POS_TRIP_CYCLES cycles */
 } fault_type_t;
 
 /** \brief Recovery actions taken in response to detected faults */
@@ -317,8 +394,21 @@ typedef struct
    double energy_J;          /**< Cumulative energy delivered to the motor up to and including this sample */
    double cycle_jitter_us;   /**< Signed offset between actual and scheduled cycle time (positive = late) */
    double pdo_exchange_us;   /**< Time spent in ecx_send_processdata + ecx_receive_processdata (frame round-trip) */
-   double position_mm;       /**< Shaft displacement from centre in mm, derived from ai1_value_V (AI1_* calibration); last CSV column */
+   double position_mm;       /**< Shaft displacement from centre in mm, derived from ai1_value_V (AI1_* calibration) */
+   double position_ref_mm;   /**< Position reference in mm (nan outside a position-control run or during the idle window) */
+   double pid_p_A;           /**< PI proportional term in Amps (nan outside a position-control run) */
+   double pid_i_A;           /**< PI integrator in Amps (nan outside a position-control run) */
+   double pid_output_A;      /**< Saturated PI output in Amps, commanded in the NEXT cycle (nan outside a position-control run) */
 } sample_log_entry_t;
+
+/** \brief Position controller values for one cycle, passed to log_sample() */
+typedef struct
+{
+   double position_ref_mm;   /**< Reference r_k in mm (nan during the idle window) */
+   double p_A;               /**< Kp * e_k in Amps */
+   double i_A;               /**< Integrator after this cycle's update, in Amps */
+   double output_A;          /**< Saturated P + I in Amps, sent to the drive in the next cycle */
+} pid_log_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
 typedef struct
@@ -348,7 +438,7 @@ boolean cia402_bring_up(Fieldbus *fieldbus);
 void add_timespec(struct timespec *ts, int64_t addus);
 boolean fieldbus_run_cyclic(Fieldbus *fieldbus);
 void log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
-                double cycle_jitter_us, double pdo_exchange_us);
+                double cycle_jitter_us, double pdo_exchange_us, const pid_log_t *pid);
 void log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
                uint32_t fault_detail, recovery_action_t recovery_action);
 void read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s);
