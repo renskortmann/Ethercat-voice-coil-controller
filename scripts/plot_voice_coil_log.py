@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot signals from the latest voice-coil log against time.
 
-Reads the most recent ``data/voice_coil_log_*.csv`` file and draws stacked
+Reads the most recent ``gcsc_data/voice_coil_log_*.csv`` file and draws stacked
 axes sharing the time axis:
 
 * current (A)  -- actual / target / demand current (left axis) and bus voltage (right axis), with show/hide checkboxes
@@ -9,18 +9,23 @@ axes sharing the time axis:
   0 = shaft centred, positive = towards the laser, raw and low-pass filtered.
   Read from the ``position_mm`` column written by the firmware; for older logs
   without that column it is derived from ai1_value using the same calibration.
-* ai2_g (g)  -- accelerometer g-force derived from ai2_value, raw and
-  low-pass filtered
+* ai2_g (g)  -- accelerometer g-force, raw and low-pass filtered. Newer logs
+  carry ai2_corrected_V (bias measured in the 0 A idle window at t < 0, see
+  docs/accelerometer-bias.md), which is used directly; older logs fall back to
+  the fixed affine calibration of ai2_value
 * power (W) / energy (J) -- bus-referred instantaneous power (left axis) and
   cumulative energy delivered to the motor (right, twin axis)
 
 Usage:
     python scripts/plot_voice_coil_log.py [path/to/log.csv]
 
-With no argument the newest log in ``data/`` is used. Log names carry the
+With no argument the newest log in ``gcsc_data/`` is used. Log names carry the
 experiment mode and parameters between the prefix and the timestamp (e.g.
 ``voice_coil_log_sine_15.0Hz_5.0A_20260923_132459.csv``); the glob above
 matches them regardless, and the full name is used as the figure title.
+
+Newer logs start with a 0 A bias idle window at negative time. It is plotted
+(shaded) but left out of the printed averages, which cover the experiment only.
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import CheckButtons
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(REPO_ROOT, "data")
+DATA_DIR = os.path.join(REPO_ROOT, "gcsc_data")
 
 # One entry per axis:
 #   (y-axis label, checkboxes?, {trace label: (csv column, colour)})
@@ -72,8 +77,9 @@ AXES = [
     ),
 ]
 
-# ai2_g is derived from ai2_value (accelerometer, 0.0578 V/g) rather than read
-# from a column of its own.
+# ai2_g is derived from the accelerometer voltage (0.0578 V/g) rather than read
+# from a column of its own. AI2_G_OFFSET is only used for older logs without
+# ai2_corrected_V; newer logs already have the measured bias removed.
 AI2_G_SCALE = -17.29 
 AI2_G_OFFSET = 13.18 
 
@@ -89,17 +95,18 @@ AI1_CENTRE_MM = 51.7
 AI1_POSITION_SIGN = -1.0
 
 # Cut-off of the first-order low-pass applied to ai2_g to give ai2_g_lp.
-AI2_G_LP_CUTOFF_HZ = 50.0
+AI2_G_LP_CUTOFF_HZ = 60.0
 
 # Cut-off of the first-order low-pass applied to ai1_mm to give ai1_mm_lp.
-AI1_MM_LP_CUTOFF_HZ = 50.0
+AI1_MM_LP_CUTOFF_HZ = 60.0
 
 # Read from the log but not plotted directly (ai1_mm / ai2_g are derived from them).
-# position_mm is absent from older logs; read_log() then yields NaN for every row
-# and main() falls back to deriving it from ai1_value.
+# position_mm and ai2_corrected are absent from older logs; read_log() then yields
+# NaN for every row and main() falls back to deriving them.
 RAW_SIGNALS = {
     "ai1_value": (("ai1_value_V", "ai1_value"), None),
     "ai2_value": (("ai2_value_V", "ai2_value"), None),
+    "ai2_corrected": (("ai2_corrected_V",), None),
     "position_mm": (("position_mm",), None),
 }
 
@@ -148,6 +155,11 @@ def read_log(path: str):
                         continue
                 series[label].append(value)
     return time_s, series
+
+
+def experiment_start(time_s: list[float]) -> int:
+    """Index of the first sample at t >= 0, i.e. after the 0 A bias idle window (0 for older logs)."""
+    return next((k for k, t in enumerate(time_s) if t >= 0.0), len(time_s))
 
 
 def time_weighted_mean(time_s: list[float], values: list[float]) -> float:
@@ -249,18 +261,33 @@ def main() -> None:
             AI1_POSITION_SIGN * (AI1_MM_SCALE * v + AI1_MM_OFFSET - AI1_CENTRE_MM)
             for v in series["ai1_value"]
         ]
-    series["ai2_g"] = [AI2_G_SCALE * v + AI2_G_OFFSET for v in series["ai2_value"]]
+    # Prefer the firmware's bias-corrected accelerometer; older logs use the fixed calibration offset.
+    if any(math.isfinite(v) for v in series["ai2_corrected"]):
+        bias_V = next(v - c for v, c in zip(series["ai2_value"], series["ai2_corrected"]) if math.isfinite(c))
+        print(f"AI2 bias: {bias_V:.4f} V, measured in the 0 A idle window")
+        series["ai2_g"] = [AI2_G_SCALE * v for v in series["ai2_corrected"]]
+    else:
+        print("note: no ai2_corrected_V in log (no idle window), using the fixed AI2 calibration offset")
+        series["ai2_g"] = [AI2_G_SCALE * v + AI2_G_OFFSET for v in series["ai2_value"]]
 
     series["ai1_mm_lp"] = low_pass(time_s, series["ai1_mm"], AI1_MM_LP_CUTOFF_HZ)
     series["ai2_g_lp"] = low_pass(time_s, series["ai2_g"], AI2_G_LP_CUTOFF_HZ)
 
-    avg_power_W = time_weighted_mean(time_s, series["power"])
-    avg_rms_power_W = rms_power(time_s, series["power"])
-    avg_ai1_value_V = time_weighted_mean(time_s, series["ai1_value"])
-    avg_position_mm = time_weighted_mean(time_s, series["ai1_mm"])
-    avg_ai2_value_V = time_weighted_mean(time_s, series["ai2_value"])
-    avg_ai2_g = time_weighted_mean(time_s, series["ai2_g"])
-    total_energy_J = series["energy"][-1] if series["energy"] else float("nan")
+    # Averages and energy cover the experiment only (t >= 0), not the 0 A bias idle window.
+    k0 = experiment_start(time_s)
+    t_exp = time_s[k0:]
+    exp = {label: values[k0:] for label, values in series.items()}
+    avg_power_W = time_weighted_mean(t_exp, exp["power"])
+    avg_rms_power_W = rms_power(t_exp, exp["power"])
+    avg_ai1_value_V = time_weighted_mean(t_exp, exp["ai1_value"])
+    avg_position_mm = time_weighted_mean(t_exp, exp["ai1_mm"])
+    avg_ai2_value_V = time_weighted_mean(t_exp, exp["ai2_value"])
+    avg_ai2_g = time_weighted_mean(t_exp, exp["ai2_g"])
+    # Energy is cumulative from the first logged sample, so subtract what the idle window accumulated.
+    idle_energy_J = series["energy"][k0 - 1] if k0 > 0 else 0.0
+    total_energy_J = exp["energy"][-1] - idle_energy_J if exp["energy"] else float("nan")
+    if k0 > 0:
+        print(f"note: {k0} samples in the 0 A bias idle window (t < 0) are plotted but left out of the averages below")
     print(f"Average power: {avg_power_W:.2f} W")
     print(f"Average RMS power: {avg_rms_power_W:.2f} W")
     print(f"Total energy delivered: {total_energy_J:.2f} J")
@@ -284,6 +311,11 @@ def main() -> None:
             lines[label] = line
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
+        if time_s[0] < 0.0:
+            ax.axvspan(time_s[0], 0.0, color="0.85", alpha=0.6, lw=0)  # 0 A bias idle window
+            if i == 0:
+                ax.text(time_s[0] / 2, 1.0, "bias window", transform=ax.get_xaxis_transform(),
+                        ha="center", va="bottom", fontsize="small", color="0.4")
         if i == n - 1:
             ax.set_xlabel("time_s (s)")
 

@@ -381,6 +381,6 @@ cat <<EOF
 
  A/B check vs. the old NIC -- run 30k cycles on each and compare the
  CSV summary line (missed deadlines / max jitter) and the
- cycle_jitter_us + pdo_exchange_us columns in data/voice_coil_log_*.csv.
+ cycle_jitter_us + pdo_exchange_us columns in gcsc_data/voice_coil_log_*.csv.
 ==============================================================
 EOF

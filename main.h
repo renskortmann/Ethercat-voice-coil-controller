@@ -27,8 +27,13 @@
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
-#define RUN_DURATION_S      120.0 /**< Total runtime in seconds */
-#define CSV_DIR             "data" /**< Output directory for CSV logs */
+#define RUN_DURATION_S      120.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
+/** 0 A rest period before the experiment starts, used to measure the accelerometer (AI2) bias.
+ *  Timestamps are shifted so this window has negative time (-BIAS_IDLE_S .. 0) and the excitation
+ *  still starts at t = 0. Total loop time is BIAS_IDLE_S + RUN_DURATION_S. export_csv() subtracts
+ *  the mean AI2 voltage over this window to produce the ai2_corrected_V column. */
+#define BIAS_IDLE_S         3.0
+#define CSV_DIR             "gcsc_data" /**< Output directory for CSV logs */
 
 /** \brief Experiment selection (compile-time). Only the per-cycle setpoint changes between
  *  experiments; scaling, PDO exchange, fault checks, timing and logging are shared. */
@@ -36,7 +41,8 @@
 #define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
 #define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
 #define EXPERIMENT_PRBS          3   /**< Pseudo-random binary current +/-PRBS_AMPLITUDE_A, then 0 A */
-#define EXPERIMENT_MODE          EXPERIMENT_PRBS /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+#define EXPERIMENT_CHIRP_SCHEDULED 4 /**< Same sweep as EXPERIMENT_CHIRP, amplitude follows CHIRP_SCHED */
+#define EXPERIMENT_MODE          EXPERIMENT_CHIRP_SCHEDULED /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
 #define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
@@ -55,11 +61,11 @@ _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
 /** \brief Chirp experiment parameters (EXPERIMENT_CHIRP). Instantaneous frequency is
  *  f(t) = CHIRP_F0_HZ * (CHIRP_F1_HZ / CHIRP_F0_HZ)^(t / CHIRP_DURATION_S), so every decade
  *  gets the same sweep time. After CHIRP_DURATION_S the current is 0 A for the rest of the run. */
-#define CHIRP_AMPLITUDE_A   6.5   /**< Current amplitude in Amps */
-#define CHIRP_F0_HZ         1.0   /**< Start frequency in Hz (> 0) */
+#define CHIRP_AMPLITUDE_A   6.0   /**< Current amplitude in Amps */
+#define CHIRP_F0_HZ         10.0   /**< Start frequency in Hz (> 0) */
 #define CHIRP_F1_HZ         55.0 /**< End frequency in Hz */
 #define CHIRP_DURATION_S    120.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
-#if EXPERIMENT_MODE == EXPERIMENT_CHIRP
+#if EXPERIMENT_MODE == EXPERIMENT_CHIRP || EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
 _Static_assert((int)(CHIRP_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),
                "CHIRP_DURATION_S must not exceed RUN_DURATION_S");
 _Static_assert((int)(CHIRP_F0_HZ * 1000) > 0 && (int)(CHIRP_F0_HZ * 1000) != (int)(CHIRP_F1_HZ * 1000),
@@ -68,6 +74,24 @@ _Static_assert((int)(CHIRP_F0_HZ * 1000) > 0 && (int)(CHIRP_F0_HZ * 1000) != (in
 _Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
                "CHIRP_F1_HZ too high for CYCLE_TIME_MS: fewer than 10 samples per period");
 #endif
+
+/** \brief Scheduled-amplitude chirp parameters (EXPERIMENT_CHIRP_SCHEDULED). The frequency sweep
+ *  uses CHIRP_F0_HZ, CHIRP_F1_HZ and CHIRP_DURATION_S above; CHIRP_AMPLITUDE_A is not used.
+ *  CHIRP_SCHED lists X(time_s, amplitude_A) breakpoints: at time_s the amplitude ramps
+ *  linearly from the previous breakpoint's value to amplitude_A over CHIRP_SCHED_RAMP_S, then holds.
+ *  The first entry must be at t = 0 (the starting amplitude, no ramp-in); times strictly increasing,
+ *  each ramp must end before the next breakpoint and the last breakpoint must be < CHIRP_DURATION_S.
+ *  Checked at startup by fieldbus_run_cyclic(), which also rejects amplitudes above the drive peak current.
+ *  Write the numbers with a decimal point (6.0, not 6): they are copied verbatim into the file name. */
+#define CHIRP_SCHED(X)      X(0.0, 3.0) X(30.0, 7.0) X(60.0, 14.0)
+#define CHIRP_SCHED_RAMP_S  30.0       /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
+/** \brief Breakpoint table and file-name label, both generated from CHIRP_SCHED so they can't
+ *  disagree. The label is e.g. "0.0s6.0A-60.0s15.0A-r30.0s": each breakpoint as <time>s<amplitude>A,
+ *  then the ramp time. */
+#define CHIRP_SCHED_ENTRY_(t, a)  {t, a},
+#define CHIRP_SCHED_TABLE         { CHIRP_SCHED(CHIRP_SCHED_ENTRY_) }
+#define CHIRP_SCHED_LABEL_(t, a)  STRINGIFY(t) "s" STRINGIFY(a) "A-"
+#define CHIRP_SCHED_NAME          CHIRP_SCHED(CHIRP_SCHED_LABEL_) "r" STRINGIFY(CHIRP_SCHED_RAMP_S) "s"
 
 /** \brief PRBS experiment parameters (EXPERIMENT_PRBS). A 15-bit maximum-length LFSR
  *  (period 32767 bits, fixed seed) sets the current to +A or -A, each bit held for
@@ -100,6 +124,9 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
 #define EXPERIMENT_TAG "chirp_" STRINGIFY(CHIRP_AMPLITUDE_A) "A_" STRINGIFY(CHIRP_F0_HZ) "to" \
                        STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
+#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
+#define EXPERIMENT_TAG "chirpsched_" CHIRP_SCHED_NAME "_" STRINGIFY(CHIRP_F0_HZ) "to" \
+                       STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
 #define EXPERIMENT_TAG "prbs_" STRINGIFY(PRBS_AMPLITUDE_A) "A_" STRINGIFY(PRBS_BANDWIDTH_HZ) "Hz_" \
                        STRINGIFY(PRBS_DURATION_S) "s"
@@ -107,7 +134,7 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #error "Unknown EXPERIMENT_MODE"
 #endif
 
-#define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
+#define MAX_SAMPLES         ((int)((BIAS_IDLE_S + RUN_DURATION_S) / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000
 
 /** CPU core reserved for the real-time cyclic loop. Adjust to match an isolated core
@@ -238,7 +265,7 @@ typedef struct
 /** \brief Timestamped data sample from one cycle of the real-time loop */
 typedef struct
 {
-   double timestamp_s;       /**< Absolute time when sample was acquired */
+   double timestamp_s;       /**< Time when sample was acquired; negative during the BIAS_IDLE_S window, 0 = experiment start */
    double ai1_value_V;       /**< Analog input 1 scaled value in physical Volts (201Ah, DAI) at this timestamp */
    double ai2_value_V;       /**< Analog input 2 scaled value in physical Volts (201Ah, DAI) at this timestamp */
    double actual_current_A;  /**< Actual motor current in physical Amps at this timestamp */
