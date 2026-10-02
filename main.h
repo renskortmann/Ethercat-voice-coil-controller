@@ -27,7 +27,7 @@
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
-#define RUN_DURATION_S      36.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
+#define RUN_DURATION_S      65.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
 /** 0 A rest period before the experiment starts, used to measure the accelerometer (AI2) bias.
  *  Timestamps are shifted so this window has negative time (-BIAS_IDLE_S .. 0) and the excitation
  *  still starts at t = 0. Total loop time is BIAS_IDLE_S + RUN_DURATION_S. export_csv() subtracts
@@ -156,16 +156,16 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #define POS_REF_SHAPE_STEPS 0    /**< Breakpoints from POS_REF_STEPS, linearly ramped over POS_REF_RAMP_S */
 #define POS_REF_SHAPE_SINE  1    /**< POS_REF_SINE_OFFSET_MM + POS_REF_SINE_AMPLITUDE_MM * sin(2 pi f t) */
 #define POS_REF_SHAPE_CHIRP 2    /**< Exponential sine sweep POS_REF_CHIRP_F0_HZ -> POS_REF_CHIRP_F1_HZ around POS_REF_CHIRP_OFFSET_MM */
-#define POS_REF_SHAPE       POS_REF_SHAPE_STEPS
+#define POS_REF_SHAPE       POS_REF_SHAPE_CHIRP
 /** X(time_s, position_mm) breakpoints: at time_s the reference ramps linearly from the previous value
  *  to position_mm over POS_REF_RAMP_S, then holds; the last value is held until RUN_DURATION_S. One
  *  entry gives a constant setpoint. The first entry must be at t = 0 (the starting reference, no
  *  ramp-in) and each ramp must end before the next breakpoint. */
-#define POS_REF_STEPS(X)    X(0.0, 0.0) X(8.0, 1.0) X(17.0, -1.0) X(26.0, 0.0)
+#define POS_REF_STEPS(X)    X(0.0, 0.0) X(5.0, 5.0) X(10.0, -2.0) X(20.0, 4.0) X(30.0, 0.0)
 #define POS_REF_RAMP_S      0.0   /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
 #define POS_REF_SINE_OFFSET_MM    0.0   /**< Sine reference centre, in mm */
-#define POS_REF_SINE_AMPLITUDE_MM 1.0   /**< Sine reference amplitude, in mm */
-#define POS_REF_SINE_FREQ_HZ      0.2   /**< Sine reference frequency, in Hz */
+#define POS_REF_SINE_AMPLITUDE_MM 5.0   /**< Sine reference amplitude, in mm */
+#define POS_REF_SINE_FREQ_HZ      1.0   /**< Sine reference frequency, in Hz */
 /** Chirp reference (POS_REF_SHAPE_CHIRP): offset until POS_REF_CHIRP_START_S, then
  *  offset + amplitude * sin(phase) with the exponential sweep f(t) = f0 * (f1 / f0)^(t / T) (equal time per
  *  octave, same law as the current-mode CHIRP), then offset until RUN_DURATION_S. The sweep runs on to the
@@ -176,8 +176,8 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #define POS_REF_CHIRP_F1_HZ        10.0  /**< End frequency in Hz */
 #define POS_REF_CHIRP_DURATION_S   60.0  /**< Sweep length T in seconds */
 #define POS_REF_CHIRP_START_S      2.0   /**< Hold at the offset before the sweep starts, in seconds */
-#define PID_KP_A_PER_MM     0.02  /**< Proportional gain: Amps per mm of position error */
-#define PID_KI_A_PER_MM_S   0.2   /**< Integral gain: Amps per mm of error per second */
+#define PID_KP_A_PER_MM     1.0  /**< Proportional gain: Amps per mm of position error */
+#define PID_KI_A_PER_MM_S   0.12   /**< Integral gain: Amps per mm of error per second */
 /* No D term yet: the laser signal carries noise and 50 Hz pickup. A later D term should act on the
  * measurement (not the error, to avoid a kick on reference steps) through a first-order low-pass. */
 #define PID_OUTPUT_LIMIT_A  10.0  /**< Controller output saturation, +/- Amps; must be below the drive peak current */
