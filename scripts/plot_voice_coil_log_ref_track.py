@@ -14,8 +14,8 @@ Two uses:
       python scripts/plot_voice_coil_log_ref_track.py [path/to/log.csv]
   With no path the newest log in gcsc_data/ is used. Three stacked axes:
     position (mm)  -- measured position (raw and 60 Hz low-pass) over the reference
-    error (mm)     -- reference - position (low-pass), the tracking error
     current (A)    -- PI output, its P and I terms, and the measured coil current
+    error (mm)     -- reference - position (low-pass), the tracking error
   The reference comes from the log's position_ref_mm column, i.e. exactly what the
   controller used. If the log has no such column it falls back to the main.h
   reference and says so. If main.h has changed since the run, a note is printed.
@@ -216,8 +216,8 @@ def tracking(cfg: dict, path: str) -> None:
     if u:
         print(f"PI output: max |u| {max(abs(v) for v in u):.3f} A")
 
-    fig, (ax_pos, ax_err, ax_cur) = plt.subplots(3, 1, sharex=True, figsize=(11, 9),
-                                                gridspec_kw={"height_ratios": [3, 1.5, 2]})
+    fig, (ax_pos, ax_cur, ax_err) = plt.subplots(3, 1, sharex=True, figsize=(11, 9),
+                                                gridspec_kw={"height_ratios": [3, 2, 1.5]})
     fig.suptitle(os.path.basename(path), fontsize="medium")
     for ax in (ax_pos, ax_err, ax_cur):
         shade_idle(ax, t[0])
@@ -233,13 +233,13 @@ def tracking(cfg: dict, path: str) -> None:
     ax_err.plot(t, err_lp, color="tab:purple", lw=1.0)
     ax_err.axhline(0.0, color="0.5", lw=0.8)
     ax_err.set_ylabel("error r - y (mm)")
+    ax_err.set_xlabel("time_s (s)")
 
     ax_cur.plot(t, c["actual_current_A"], color="tab:blue", lw=0.8, alpha=0.6, label="actual current")
     ax_cur.plot(t, c["pid_output_A"], color="tab:purple", lw=1.2, label="PI output u (sent next cycle)")
     ax_cur.plot(t, c["pid_p_A"], color="tab:green", lw=0.8, label="P term")
     ax_cur.plot(t, c["pid_i_A"], color="tab:orange", lw=0.8, label="I term")
     ax_cur.set_ylabel("current (A)")
-    ax_cur.set_xlabel("time_s (s)")
     ax_cur.legend(loc="upper right", fontsize="small", ncol=2)
 
     fig.tight_layout()
