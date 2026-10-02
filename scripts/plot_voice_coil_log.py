@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot signals from the latest voice-coil log against time.
 
-Reads the most recent ``data/voice_coil_log_*.csv`` file and draws stacked
+Reads the most recent ``gcsc_data/voice_coil_log_*.csv`` file and draws stacked
 axes sharing the time axis:
 
 * current (A)  -- actual / target / demand current (left axis) and bus voltage (right axis), with show/hide checkboxes
@@ -19,7 +19,7 @@ axes sharing the time axis:
 Usage:
     python scripts/plot_voice_coil_log.py [path/to/log.csv]
 
-With no argument the newest log in ``data/`` is used. Log names carry the
+With no argument the newest log in ``gcsc_data/`` is used. Log names carry the
 experiment mode and parameters between the prefix and the timestamp (e.g.
 ``voice_coil_log_sine_15.0Hz_5.0A_20260923_132459.csv``); the glob above
 matches them regardless, and the full name is used as the figure title.
@@ -40,7 +40,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import CheckButtons
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(REPO_ROOT, "data")
+DATA_DIR = os.path.join(REPO_ROOT, "gcsc_data")
 
 # One entry per axis:
 #   (y-axis label, checkboxes?, {trace label: (csv column, colour)})
@@ -95,10 +95,10 @@ AI1_CENTRE_MM = 51.7
 AI1_POSITION_SIGN = -1.0
 
 # Cut-off of the first-order low-pass applied to ai2_g to give ai2_g_lp.
-AI2_G_LP_CUTOFF_HZ = 50.0
+AI2_G_LP_CUTOFF_HZ = 60.0
 
 # Cut-off of the first-order low-pass applied to ai1_mm to give ai1_mm_lp.
-AI1_MM_LP_CUTOFF_HZ = 50.0
+AI1_MM_LP_CUTOFF_HZ = 60.0
 
 # Read from the log but not plotted directly (ai1_mm / ai2_g are derived from them).
 # position_mm and ai2_corrected are absent from older logs; read_log() then yields

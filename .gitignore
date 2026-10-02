@@ -15,6 +15,16 @@
 # System identification split: test/ and train/ hold copies of whole runs
 !/data/test/
 !/data/train/
+/gcsc_data/*
+!/gcsc_data/.gitkeep
+!/gcsc_data/voice_coil_faults_chirp_6.0A_1.0to55.0Hz_120.0s_20261002_094200.csv
+!/gcsc_data/voice_coil_faults_chirp_6.5A_1.0to55.0Hz_120.0s_20261002_093641.csv
+!/gcsc_data/voice_coil_faults_chirpsched_0.0s2.0A-30.0s6.0A-60.0s15.0A-r30.0s_10.0to55.0Hz_120.0s_20261002_102726.csv
+!/gcsc_data/voice_coil_faults_chirpsched_0.0s3.0A-30.0s7.0A-60.0s14.0A-r30.0s_10.0to55.0Hz_120.0s_20261002_103233.csv
+!/gcsc_data/voice_coil_log_chirp_6.0A_1.0to55.0Hz_120.0s_20261002_094200.csv
+!/gcsc_data/voice_coil_log_chirp_6.5A_1.0to55.0Hz_120.0s_20261002_093641.csv
+!/gcsc_data/voice_coil_log_chirpsched_0.0s2.0A-30.0s6.0A-60.0s15.0A-r30.0s_10.0to55.0Hz_120.0s_20261002_102726.csv
+!/gcsc_data/voice_coil_log_chirpsched_0.0s3.0A-30.0s7.0A-60.0s14.0A-r30.0s_10.0to55.0Hz_120.0s_20261002_103233.csv
 /voice-coil
 /ethercat-voice-coil-controller
 /build

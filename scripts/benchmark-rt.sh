@@ -48,7 +48,7 @@ COMPARE_LABELS=()
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-DATA_DIR="$REPO_DIR/data"
+DATA_DIR="$REPO_DIR/gcsc_data"
 BENCH_DIR="$DATA_DIR/benchmark"
 BINARY="$REPO_DIR/ethercat-voice-coil-controller"
 

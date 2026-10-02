@@ -85,26 +85,26 @@ chirp_sched_check(double kp_amps)
 {
    if (chirp_sched[0].t_s != 0.0)
    {
-      printf("CHIRP_SCHED_TABLE: first breakpoint must be at t = 0 s (is %.3f s)\n", chirp_sched[0].t_s);
+      printf("CHIRP_SCHED: first breakpoint must be at t = 0 s (is %.3f s)\n", chirp_sched[0].t_s);
       return FALSE;
    }
    for (int i = 0; i < CHIRP_SCHED_N; i++)
    {
       if (fabs(chirp_sched[i].amp_A) > kp_amps)
       {
-         printf("CHIRP_SCHED_TABLE: %.2f A at t = %.3f s exceeds the drive peak current %.1f A\n",
+         printf("CHIRP_SCHED: %.2f A at t = %.3f s exceeds the drive peak current %.1f A\n",
                 chirp_sched[i].amp_A, chirp_sched[i].t_s, kp_amps);
          return FALSE;
       }
       if (chirp_sched[i].t_s >= CHIRP_DURATION_S)
       {
-         printf("CHIRP_SCHED_TABLE: breakpoint at t = %.3f s is not before CHIRP_DURATION_S (%.1f s)\n",
+         printf("CHIRP_SCHED: breakpoint at t = %.3f s is not before CHIRP_DURATION_S (%.1f s)\n",
                 chirp_sched[i].t_s, CHIRP_DURATION_S);
          return FALSE;
       }
       if (i > 0 && chirp_sched[i].t_s < chirp_sched[i - 1].t_s + CHIRP_SCHED_RAMP_S)
       {
-         printf("CHIRP_SCHED_TABLE: breakpoint at t = %.3f s starts before the ramp at t = %.3f s ends "
+         printf("CHIRP_SCHED: breakpoint at t = %.3f s starts before the ramp at t = %.3f s ends "
                 "(times must increase by at least CHIRP_SCHED_RAMP_S = %.3f s)\n",
                 chirp_sched[i].t_s, chirp_sched[i - 1].t_s, CHIRP_SCHED_RAMP_S);
          return FALSE;
