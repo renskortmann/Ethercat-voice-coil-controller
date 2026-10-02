@@ -31,6 +31,89 @@ timespec_diff_us(const struct timespec *end, const struct timespec *start)
           (double)(end->tv_nsec - start->tv_nsec) / 1000.0;
 }
 
+#if EXPERIMENT_MODE == EXPERIMENT_CHIRP || EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
+/** \brief Unit-amplitude exponential chirp CHIRP_F0_HZ -> CHIRP_F1_HZ over CHIRP_DURATION_S
+ *  \param t Time since the start of the sweep in seconds (0 <= t < CHIRP_DURATION_S)
+ *  \return sin(phase(t)), in [-1, 1]
+ */
+static double
+chirp_unit(double t)
+{
+   /* Phase is the integral of f(t) = f0 * exp(t / L), with L = T / ln(f1 / f0). */
+   const double L = CHIRP_DURATION_S / log(CHIRP_F1_HZ / CHIRP_F0_HZ);
+   return sin(2.0 * M_PI * CHIRP_F0_HZ * L * (exp(t / L) - 1.0));
+}
+#endif
+
+#if EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
+/** \brief Amplitude breakpoints from CHIRP_SCHED_TABLE, validated by chirp_sched_check() */
+static const struct
+{
+   double t_s;      /**< Time the ramp to amp_A starts, in seconds */
+   double amp_A;    /**< Amplitude after the ramp, in Amps */
+} chirp_sched[] = CHIRP_SCHED_TABLE;
+#define CHIRP_SCHED_N ((int)(sizeof(chirp_sched) / sizeof(chirp_sched[0])))
+
+/** \brief Chirp amplitude envelope at time t: the last breakpoint at or before t, ramped in
+ *  linearly from the previous breakpoint's amplitude over CHIRP_SCHED_RAMP_S
+ *  \param t Time since the start of the sweep in seconds (t >= 0)
+ *  \return Amplitude in Amps
+ */
+static double
+chirp_sched_amplitude_A(double t)
+{
+   int i = 0;
+   while (i + 1 < CHIRP_SCHED_N && chirp_sched[i + 1].t_s <= t)
+   {
+      i++;
+   }
+   double into_ramp_s = t - chirp_sched[i].t_s;
+   if (i > 0 && CHIRP_SCHED_RAMP_S > 0.0 && into_ramp_s < CHIRP_SCHED_RAMP_S)
+   {
+      double prev_A = chirp_sched[i - 1].amp_A;
+      return prev_A + (chirp_sched[i].amp_A - prev_A) * (into_ramp_s / CHIRP_SCHED_RAMP_S);
+   }
+   return chirp_sched[i].amp_A;
+}
+
+/** \brief Check CHIRP_SCHED_TABLE before the run (doubles rule out a _Static_assert)
+ *  \param kp_amps Drive peak current; larger amplitudes would be clipped by the saturation
+ *  \return TRUE if the table is usable, FALSE (with a message printed) otherwise
+ */
+static boolean
+chirp_sched_check(double kp_amps)
+{
+   if (chirp_sched[0].t_s != 0.0)
+   {
+      printf("CHIRP_SCHED_TABLE: first breakpoint must be at t = 0 s (is %.3f s)\n", chirp_sched[0].t_s);
+      return FALSE;
+   }
+   for (int i = 0; i < CHIRP_SCHED_N; i++)
+   {
+      if (fabs(chirp_sched[i].amp_A) > kp_amps)
+      {
+         printf("CHIRP_SCHED_TABLE: %.2f A at t = %.3f s exceeds the drive peak current %.1f A\n",
+                chirp_sched[i].amp_A, chirp_sched[i].t_s, kp_amps);
+         return FALSE;
+      }
+      if (chirp_sched[i].t_s >= CHIRP_DURATION_S)
+      {
+         printf("CHIRP_SCHED_TABLE: breakpoint at t = %.3f s is not before CHIRP_DURATION_S (%.1f s)\n",
+                chirp_sched[i].t_s, CHIRP_DURATION_S);
+         return FALSE;
+      }
+      if (i > 0 && chirp_sched[i].t_s < chirp_sched[i - 1].t_s + CHIRP_SCHED_RAMP_S)
+      {
+         printf("CHIRP_SCHED_TABLE: breakpoint at t = %.3f s starts before the ramp at t = %.3f s ends "
+                "(times must increase by at least CHIRP_SCHED_RAMP_S = %.3f s)\n",
+                chirp_sched[i].t_s, chirp_sched[i - 1].t_s, CHIRP_SCHED_RAMP_S);
+         return FALSE;
+      }
+   }
+   return TRUE;
+}
+#endif
+
 /** \brief Target current for this cycle, in Amps, for the experiment selected by EXPERIMENT_MODE
  *  This is the only experiment-specific code in the cyclic loop. It must stay cheap and
  *  allocation-free: it runs once per cycle inside the real-time loop.
@@ -57,9 +140,13 @@ experiment_target_current_A(double elapsed_s)
    {
       return 0.0;                                            /* sweep done: ring-down */
    }
-   /* Phase is the integral of f(t) = f0 * exp(t / L), with L = T / ln(f1 / f0). */
-   const double L = CHIRP_DURATION_S / log(CHIRP_F1_HZ / CHIRP_F0_HZ);
-   return CHIRP_AMPLITUDE_A * sin(2.0 * M_PI * CHIRP_F0_HZ * L * (exp(elapsed_s / L) - 1.0));
+   return CHIRP_AMPLITUDE_A * chirp_unit(elapsed_s);
+#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
+   if (elapsed_s >= CHIRP_DURATION_S)
+   {
+      return 0.0;                                            /* sweep done: ring-down */
+   }
+   return chirp_sched_amplitude_A(elapsed_s) * chirp_unit(elapsed_s);
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
    static uint16_t lfsr = 1;      /* 15-bit LFSR state; nonzero seed, fixed so every run repeats */
    static long bit_index = 0;     /* index of the PRBS bit held in lfsr */
@@ -129,6 +216,22 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 #elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
    printf("\nExperiment: exponential chirp, %.2f A, %.2f -> %.2f Hz over %.2f s, then 0 A\n",
           CHIRP_AMPLITUDE_A, CHIRP_F0_HZ, CHIRP_F1_HZ, CHIRP_DURATION_S);
+#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
+   printf("\nExperiment: exponential chirp, scheduled amplitude, %.2f -> %.2f Hz over %.2f s, then 0 A\n",
+          CHIRP_F0_HZ, CHIRP_F1_HZ, CHIRP_DURATION_S);
+   for (int i = 0; i < CHIRP_SCHED_N; i++)
+   {
+      printf("  t = %7.2f s -> %.2f A%s\n", chirp_sched[i].t_s, chirp_sched[i].amp_A,
+             i > 0 && CHIRP_SCHED_RAMP_S > 0.0 ? " (linear ramp)" : "");
+   }
+   if (CHIRP_SCHED_RAMP_S > 0.0)
+   {
+      printf("  ramp time %.2f s\n", CHIRP_SCHED_RAMP_S);
+   }
+   if (!chirp_sched_check(fieldbus->kp_amps))
+   {
+      return FALSE;
+   }
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
    printf("\nExperiment: PRBS, +/-%.2f A, bandwidth %.1f Hz (%d cycles per bit) for %.2f s, then 0 A\n",
           PRBS_AMPLITUDE_A, PRBS_BANDWIDTH_HZ, PRBS_HOLD_CYCLES, PRBS_DURATION_S);

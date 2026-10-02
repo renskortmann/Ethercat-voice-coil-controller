@@ -33,7 +33,7 @@
  *  still starts at t = 0. Total loop time is BIAS_IDLE_S + RUN_DURATION_S. export_csv() subtracts
  *  the mean AI2 voltage over this window to produce the ai2_corrected_V column. */
 #define BIAS_IDLE_S         3.0
-#define CSV_DIR             "data" /**< Output directory for CSV logs */
+#define CSV_DIR             "gcsc_data" /**< Output directory for CSV logs */
 
 /** \brief Experiment selection (compile-time). Only the per-cycle setpoint changes between
  *  experiments; scaling, PDO exchange, fault checks, timing and logging are shared. */
@@ -41,7 +41,8 @@
 #define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
 #define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
 #define EXPERIMENT_PRBS          3   /**< Pseudo-random binary current +/-PRBS_AMPLITUDE_A, then 0 A */
-#define EXPERIMENT_MODE          EXPERIMENT_PRBS /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+#define EXPERIMENT_CHIRP_SCHEDULED 4 /**< Same sweep as EXPERIMENT_CHIRP, amplitude follows CHIRP_SCHED_TABLE */
+#define EXPERIMENT_MODE          EXPERIMENT_CHIRP_SCHEDULED /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
 #define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
@@ -60,11 +61,11 @@ _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
 /** \brief Chirp experiment parameters (EXPERIMENT_CHIRP). Instantaneous frequency is
  *  f(t) = CHIRP_F0_HZ * (CHIRP_F1_HZ / CHIRP_F0_HZ)^(t / CHIRP_DURATION_S), so every decade
  *  gets the same sweep time. After CHIRP_DURATION_S the current is 0 A for the rest of the run. */
-#define CHIRP_AMPLITUDE_A   6.5   /**< Current amplitude in Amps */
+#define CHIRP_AMPLITUDE_A   6.0   /**< Current amplitude in Amps */
 #define CHIRP_F0_HZ         1.0   /**< Start frequency in Hz (> 0) */
 #define CHIRP_F1_HZ         55.0 /**< End frequency in Hz */
 #define CHIRP_DURATION_S    120.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
-#if EXPERIMENT_MODE == EXPERIMENT_CHIRP
+#if EXPERIMENT_MODE == EXPERIMENT_CHIRP || EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
 _Static_assert((int)(CHIRP_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),
                "CHIRP_DURATION_S must not exceed RUN_DURATION_S");
 _Static_assert((int)(CHIRP_F0_HZ * 1000) > 0 && (int)(CHIRP_F0_HZ * 1000) != (int)(CHIRP_F1_HZ * 1000),
@@ -73,6 +74,17 @@ _Static_assert((int)(CHIRP_F0_HZ * 1000) > 0 && (int)(CHIRP_F0_HZ * 1000) != (in
 _Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
                "CHIRP_F1_HZ too high for CYCLE_TIME_MS: fewer than 10 samples per period");
 #endif
+
+/** \brief Scheduled-amplitude chirp parameters (EXPERIMENT_CHIRP_SCHEDULED). The frequency sweep
+ *  uses CHIRP_F0_HZ, CHIRP_F1_HZ and CHIRP_DURATION_S above; CHIRP_AMPLITUDE_A is not used.
+ *  CHIRP_SCHED_TABLE lists {time_s, amplitude_A} breakpoints: at time_s the amplitude ramps
+ *  linearly from the previous breakpoint's value to amplitude_A over CHIRP_SCHED_RAMP_S, then holds.
+ *  The first entry must be at t = 0 (the starting amplitude, no ramp-in); times strictly increasing,
+ *  each ramp must end before the next breakpoint and the last breakpoint must be < CHIRP_DURATION_S.
+ *  Checked at startup by fieldbus_run_cyclic(), which also rejects amplitudes above the drive peak current. */
+#define CHIRP_SCHED_TABLE   { {0.0, 6.0}, {60.0, 15.0} }
+#define CHIRP_SCHED_RAMP_S  30.0       /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
+#define CHIRP_SCHED_NAME    "6-4-2A"  /**< Filename-safe label for the schedule, goes into EXPERIMENT_TAG */
 
 /** \brief PRBS experiment parameters (EXPERIMENT_PRBS). A 15-bit maximum-length LFSR
  *  (period 32767 bits, fixed seed) sets the current to +A or -A, each bit held for
@@ -104,6 +116,9 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
                        "s_dur" STRINGIFY(HOLD_DURATION_S) "s"
 #elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
 #define EXPERIMENT_TAG "chirp_" STRINGIFY(CHIRP_AMPLITUDE_A) "A_" STRINGIFY(CHIRP_F0_HZ) "to" \
+                       STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
+#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
+#define EXPERIMENT_TAG "chirpsched_" CHIRP_SCHED_NAME "_" STRINGIFY(CHIRP_F0_HZ) "to" \
                        STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
 #define EXPERIMENT_TAG "prbs_" STRINGIFY(PRBS_AMPLITUDE_A) "A_" STRINGIFY(PRBS_BANDWIDTH_HZ) "Hz_" \
