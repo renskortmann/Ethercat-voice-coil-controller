@@ -40,7 +40,7 @@ This document describes the system in terms of signals, timing and calculations.
 ### Reference generator
 The reference is fixed when you compile. It is an **absolute** position in the `position_mm` frame, where 0 mm is the calibrated centre (`AI1_CENTRE_MM`). It is *not* an offset from wherever the shaft happens to rest. There are two shapes:
 - **Steps** (`POS_REF_SHAPE_STEPS`): a list of (time, position) breakpoints.
-  - At each breakpoint the reference moves linearly to the new value over `POS_REF_RAMP_S` (1 s). Set that to 0 for a hard step.
+  - At each breakpoint the reference moves linearly to the new value over `POS_REF_RAMP_S`. The default is 0, which gives hard steps.
   - After the last breakpoint the value is held until the end of the run.
   - One breakpoint gives a constant setpoint.
 - **Sine** (`POS_REF_SHAPE_SINE`): offset + amplitude · sin(2π f t).
@@ -108,15 +108,15 @@ With the default profile (0 → +1 → −1 → 0 mm):
 | −3 … 0 s | **Idle window.** Drive enabled, 0 A, PI off (integrator held at 0). This is used to measure the accelerometer bias (see `accelerometer-bias.md`). The position trip is already active. |
 | 0 s | **PI switches on.** The reference is 0 mm, but the shaft rests wherever the springs left it (+0.2 … +2.3 mm seen on 2 Oct). The PI pulls it to 0 mm in about 3–4 s. This first move is expected, because the frame is absolute. |
 | 0 … 8 s | hold 0 mm |
-| 8 … 9 s | ramp to +1 mm |
-| 9 … 17 s | hold +1 mm |
-| 17 … 18 s | ramp to −1 mm |
-| 18 … 26 s | hold −1 mm |
-| 26 … 27 s | ramp to 0 mm |
-| 27 … 36 s | hold 0 mm until `RUN_DURATION_S` |
+| 8 s | step to +1 mm |
+| 8 … 17 s | hold +1 mm |
+| 17 s | step to −1 mm (a 2 mm step) |
+| 17 … 26 s | hold −1 mm |
+| 26 s | step to 0 mm |
+| 26 … 36 s | hold 0 mm until `RUN_DURATION_S` |
 | 36 s | **End.** The loop stops and the drive voltage is disabled. Current drops to 0 and the springs return the shaft to rest. |
 
-**Expected response.** The closed loop follows the reference with a time constant of about 0.8 s. A step is about 95 % complete after 2.4 s and fully settled within about 4 s, well inside the 8 s holds. Holding ±1 mm takes only about 0.15 A; pulling 2 mm from rest takes about 0.3 A. A simulation of the real controller code against the identified plant peaked at 0.47 A.
+**Expected response.** The closed loop follows the reference with a time constant of about 0.8 s. A step is about 95 % complete after 2.4 s and fully settled within about 4 s, well inside the 8–9 s holds. At a hard step, P jumps by Kp × step size: 20 mA for 1 mm, 40 mA for the 2 mm step. That is a gentle kick. The integrator then builds the rest of the current smoothly. Holding ±1 mm takes only about 0.15 A; pulling 2 mm from rest takes about 0.3 A. A simulation of the real controller code against the identified plant peaked at 0.47 A.
 
 ## 5. Units and scaling chain
 
@@ -196,7 +196,7 @@ The 3-cycle confirmation keeps a single noise spike from stopping the run. 1.5 m
 
 ## 8. Reading the log
 
-The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0.0mm-8.0s1.0mm-17.0s-1.0mm-26.0s0.0mm-r1.0s_kp0.02_ki0.2_<date>_<time>.csv`. It has four new columns at the end (all other modes write `nan` in them):
+The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0.0mm-8.0s1.0mm-17.0s-1.0mm-26.0s0.0mm-r0.0s_kp0.02_ki0.2_<date>_<time>.csv`. It has four new columns at the end (all other modes write `nan` in them):
 
 | Column | Meaning |
 |---|---|

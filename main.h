@@ -161,7 +161,7 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
  *  entry gives a constant setpoint. The first entry must be at t = 0 (the starting reference, no
  *  ramp-in) and each ramp must end before the next breakpoint. */
 #define POS_REF_STEPS(X)    X(0.0, 0.0) X(8.0, 1.0) X(17.0, -1.0) X(26.0, 0.0)
-#define POS_REF_RAMP_S      1.0   /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
+#define POS_REF_RAMP_S      0.0   /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
 #define POS_REF_SINE_OFFSET_MM    0.0   /**< Sine reference centre, in mm */
 #define POS_REF_SINE_AMPLITUDE_MM 1.0   /**< Sine reference amplitude, in mm */
 #define POS_REF_SINE_FREQ_HZ      0.2   /**< Sine reference frequency, in Hz */
