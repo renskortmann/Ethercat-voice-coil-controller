@@ -27,7 +27,7 @@
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
-#define RUN_DURATION_S      120.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
+#define RUN_DURATION_S      128.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
 /** 0 A rest period before the experiment starts, used to measure the accelerometer (AI2) bias.
  *  Timestamps are shifted so this window has negative time (-BIAS_IDLE_S .. 0) and the excitation
  *  still starts at t = 0. Total loop time is BIAS_IDLE_S + RUN_DURATION_S. export_csv() subtracts
@@ -42,11 +42,15 @@
 #define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
 #define EXPERIMENT_PRBS          3   /**< Pseudo-random binary current +/-PRBS_AMPLITUDE_A, then 0 A */
 #define EXPERIMENT_CHIRP_SCHEDULED 4 /**< Same sweep as EXPERIMENT_CHIRP, amplitude follows CHIRP_SCHED */
-#define EXPERIMENT_MODE          EXPERIMENT_CHIRP_SCHEDULED /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+#define EXPERIMENT_NOISE         5   /**< 0 A for the whole run with the drive enabled: sensor noise floor */
+#define EXPERIMENT_SINE_BLOCKS   6   /**< Sequence of ramped constant-frequency sine blocks from SINE_BLOCKS */
+#define EXPERIMENT_MODE          EXPERIMENT_SINE_BLOCKS /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
+
 
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
 #define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
 #define SINE_AMPLITUDE_A    5.0  /**< Target current waveform amplitude in Amps */
+
 
 /** \brief Step-release experiment parameters (EXPERIMENT_STEP_RELEASE) */
 #define HOLD_CURRENT_A      7.5  /**< Constant current during the hold phase, in Amps (sign = direction) */
@@ -57,6 +61,7 @@
 _Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
                "HOLD_DURATION_S must be shorter than RUN_DURATION_S, otherwise the release never happens");
 #endif
+
 
 /** \brief Chirp experiment parameters (EXPERIMENT_CHIRP). Instantaneous frequency is
  *  f(t) = CHIRP_F0_HZ * (CHIRP_F1_HZ / CHIRP_F0_HZ)^(t / CHIRP_DURATION_S), so every decade
@@ -75,6 +80,7 @@ _Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
                "CHIRP_F1_HZ too high for CYCLE_TIME_MS: fewer than 10 samples per period");
 #endif
 
+
 /** \brief Scheduled-amplitude chirp parameters (EXPERIMENT_CHIRP_SCHEDULED). The frequency sweep
  *  uses CHIRP_F0_HZ, CHIRP_F1_HZ and CHIRP_DURATION_S above; CHIRP_AMPLITUDE_A is not used.
  *  CHIRP_SCHED lists X(time_s, amplitude_A) breakpoints: at time_s the amplitude ramps
@@ -92,6 +98,37 @@ _Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
 #define CHIRP_SCHED_TABLE         { CHIRP_SCHED(CHIRP_SCHED_ENTRY_) }
 #define CHIRP_SCHED_LABEL_(t, a)  STRINGIFY(t) "s" STRINGIFY(a) "A-"
 #define CHIRP_SCHED_NAME          CHIRP_SCHED(CHIRP_SCHED_LABEL_) "r" STRINGIFY(CHIRP_SCHED_RAMP_S) "s"
+
+
+/** \brief Sine-block experiment parameters (EXPERIMENT_SINE_BLOCKS). SINE_BLOCKS lists
+ *  X(freq_Hz, amplitude_A) blocks, run back to back. Each block: linear ramp-in over
+ *  SINE_BLOCK_RAMP_S, full amplitude for SINE_BLOCK_HOLD_S (the analysis window), linear ramp-out
+ *  over SINE_BLOCK_RAMP_S, then SINE_BLOCK_PAUSE_S at 0 A. The sine phase restarts at 0 at each
+ *  block start. Block k's hold window is t = k * SINE_BLOCK_PERIOD_S + SINE_BLOCK_RAMP_S .. + SINE_BLOCK_HOLD_S.
+ *  Amplitudes are checked against the drive peak current at startup by fieldbus_run_cyclic().
+ *  Write the numbers with a decimal point (6.0, not 6): they are copied verbatim into the file name. */
+#define SINE_BLOCKS(X)      X(10.0, 10.0) X(20.0, 15.0) X(40.0, 20.0) X(50.0, 22.0)
+#define SINE_BLOCK_RAMP_S   5.0   /**< Linear ramp-in and ramp-out time per block, in seconds (> 0) */
+#define SINE_BLOCK_HOLD_S   20.0  /**< Full-amplitude time per block, in seconds */
+#define SINE_BLOCK_PAUSE_S  2.0   /**< 0 A after each block (including the last), in seconds */
+#define SINE_BLOCK_PERIOD_S (2.0 * SINE_BLOCK_RAMP_S + SINE_BLOCK_HOLD_S + SINE_BLOCK_PAUSE_S)
+/** \brief Block table, count and file-name label, all generated from SINE_BLOCKS. The label is
+ *  e.g. "10.0Hz5.0A-20.0Hz10.0A": each block as <freq>Hz<amplitude>A. */
+#define SINE_BLOCKS_ENTRY_(f, a)  {f, a},
+#define SINE_BLOCKS_TABLE         { SINE_BLOCKS(SINE_BLOCKS_ENTRY_) }
+#define SINE_BLOCKS_ONE_(f, a)    + 1
+#define SINE_BLOCKS_COUNT         (0 SINE_BLOCKS(SINE_BLOCKS_ONE_))
+#define SINE_BLOCKS_FREQ_OK_(f, a) && (int)((f) * 1000) > 0 && (int)((f) * CYCLE_TIME_MS) <= 100
+#define SINE_BLOCKS_LABEL_(f, a)  STRINGIFY(f) "Hz" STRINGIFY(a) "A-"
+#define SINE_BLOCKS_NAME          SINE_BLOCKS(SINE_BLOCKS_LABEL_)
+#if EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
+_Static_assert((int)(SINE_BLOCKS_COUNT * SINE_BLOCK_PERIOD_S * 1000) <= (int)(RUN_DURATION_S * 1000),
+               "SINE_BLOCKS do not fit in RUN_DURATION_S (count * SINE_BLOCK_PERIOD_S)");
+_Static_assert((int)(SINE_BLOCK_RAMP_S * 1000) > 0, "SINE_BLOCK_RAMP_S must be > 0");
+/* 10 samples per period at each block frequency: <= 200 Hz at a 0.5 ms cycle. */
+_Static_assert(1 SINE_BLOCKS(SINE_BLOCKS_FREQ_OK_),
+               "SINE_BLOCKS frequency must be > 0 and give at least 10 samples per period at CYCLE_TIME_MS");
+#endif
 
 /** \brief PRBS experiment parameters (EXPERIMENT_PRBS). A 15-bit maximum-length LFSR
  *  (period 32767 bits, fixed seed) sets the current to +A or -A, each bit held for
@@ -112,7 +149,6 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 /** \brief Stringize a macro's expanded value (two levels so the argument is expanded first) */
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x)  STRINGIFY_(x)
-
 /** \brief Experiment mode + parameters as a filename-safe tag, built at compile time from the
  *  macros above so the values are never duplicated by hand. Used by export_csv() to name the
  *  CSV files, e.g. voice_coil_log_sine_15.0Hz_5.0A_YYYYMMDD_HHMMSS.csv */
@@ -127,6 +163,11 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #elif EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
 #define EXPERIMENT_TAG "chirpsched_" CHIRP_SCHED_NAME "_" STRINGIFY(CHIRP_F0_HZ) "to" \
                        STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
+#elif EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
+#define EXPERIMENT_TAG "sineblocks_" SINE_BLOCKS_NAME "r" STRINGIFY(SINE_BLOCK_RAMP_S) "s_h" \
+                       STRINGIFY(SINE_BLOCK_HOLD_S) "s_p" STRINGIFY(SINE_BLOCK_PAUSE_S) "s"
+#elif EXPERIMENT_MODE == EXPERIMENT_NOISE
+#define EXPERIMENT_TAG "noise_0A_" STRINGIFY(RUN_DURATION_S) "s"
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
 #define EXPERIMENT_TAG "prbs_" STRINGIFY(PRBS_AMPLITUDE_A) "A_" STRINGIFY(PRBS_BANDWIDTH_HZ) "Hz_" \
                        STRINGIFY(PRBS_DURATION_S) "s"

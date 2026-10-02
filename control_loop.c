@@ -114,6 +114,68 @@ chirp_sched_check(double kp_amps)
 }
 #endif
 
+#if EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
+/** \brief Sine blocks from SINE_BLOCKS_TABLE, validated by sine_blocks_check() */
+static const struct
+{
+   double f_Hz;     /**< Sine frequency in Hz */
+   double amp_A;    /**< Amplitude during the hold, in Amps */
+} sine_blocks[] = SINE_BLOCKS_TABLE;
+#define SINE_BLOCKS_N ((int)(sizeof(sine_blocks) / sizeof(sine_blocks[0])))
+
+/** \brief Sine-block current at time t: ramp-in, hold, ramp-out, pause per block, then 0 A
+ *  \param t Time since the start of the first block in seconds (t >= 0)
+ *  \return Target current in Amps
+ */
+static double
+sine_blocks_current_A(double t)
+{
+   int k = (int)(t / SINE_BLOCK_PERIOD_S);
+   if (k >= SINE_BLOCKS_N)
+   {
+      return 0.0;                                            /* all blocks done: ring-down */
+   }
+   double tb = t - k * SINE_BLOCK_PERIOD_S;                  /* time into block k */
+   double envelope;
+   if (tb < SINE_BLOCK_RAMP_S)
+   {
+      envelope = tb / SINE_BLOCK_RAMP_S;                     /* ramp in */
+   }
+   else if (tb < SINE_BLOCK_RAMP_S + SINE_BLOCK_HOLD_S)
+   {
+      envelope = 1.0;                                        /* hold */
+   }
+   else if (tb < 2.0 * SINE_BLOCK_RAMP_S + SINE_BLOCK_HOLD_S)
+   {
+      envelope = (2.0 * SINE_BLOCK_RAMP_S + SINE_BLOCK_HOLD_S - tb) / SINE_BLOCK_RAMP_S;  /* ramp out */
+   }
+   else
+   {
+      return 0.0;                                            /* pause */
+   }
+   return sine_blocks[k].amp_A * envelope * sin(2.0 * M_PI * sine_blocks[k].f_Hz * tb);
+}
+
+/** \brief Check SINE_BLOCKS_TABLE before the run (doubles rule out a _Static_assert)
+ *  \param kp_amps Drive peak current; larger amplitudes would be clipped by the saturation
+ *  \return TRUE if the table is usable, FALSE (with a message printed) otherwise
+ */
+static boolean
+sine_blocks_check(double kp_amps)
+{
+   for (int i = 0; i < SINE_BLOCKS_N; i++)
+   {
+      if (fabs(sine_blocks[i].amp_A) > kp_amps)
+      {
+         printf("SINE_BLOCKS: %.2f A in block %d (%.2f Hz) exceeds the drive peak current %.1f A\n",
+                sine_blocks[i].amp_A, i, sine_blocks[i].f_Hz, kp_amps);
+         return FALSE;
+      }
+   }
+   return TRUE;
+}
+#endif
+
 /** \brief Target current for this cycle, in Amps, for the experiment selected by EXPERIMENT_MODE
  *  This is the only experiment-specific code in the cyclic loop. It must stay cheap and
  *  allocation-free: it runs once per cycle inside the real-time loop.
@@ -164,6 +226,11 @@ experiment_target_current_A(double elapsed_s)
       bit_index++;
    }
    return (lfsr & 1u) ? PRBS_AMPLITUDE_A : -PRBS_AMPLITUDE_A;
+#elif EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
+   return sine_blocks_current_A(elapsed_s);
+#elif EXPERIMENT_MODE == EXPERIMENT_NOISE
+   (void)elapsed_s;
+   return 0.0;                                               /* noise floor: drive enabled, no excitation */
 #else
 #error "Unknown EXPERIMENT_MODE"
 #endif
@@ -235,6 +302,21 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
    printf("\nExperiment: PRBS, +/-%.2f A, bandwidth %.1f Hz (%d cycles per bit) for %.2f s, then 0 A\n",
           PRBS_AMPLITUDE_A, PRBS_BANDWIDTH_HZ, PRBS_HOLD_CYCLES, PRBS_DURATION_S);
+#elif EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
+   printf("\nExperiment: %d sine blocks, each %.1f s ramp-in, %.1f s hold, %.1f s ramp-out, %.1f s at 0 A\n",
+          SINE_BLOCKS_N, SINE_BLOCK_RAMP_S, SINE_BLOCK_HOLD_S, SINE_BLOCK_RAMP_S, SINE_BLOCK_PAUSE_S);
+   for (int i = 0; i < SINE_BLOCKS_N; i++)
+   {
+      double hold_start_s = i * SINE_BLOCK_PERIOD_S + SINE_BLOCK_RAMP_S;
+      printf("  block %d: %6.2f Hz, %5.2f A, hold t = %7.2f .. %7.2f s\n", i, sine_blocks[i].f_Hz,
+             sine_blocks[i].amp_A, hold_start_s, hold_start_s + SINE_BLOCK_HOLD_S);
+   }
+   if (!sine_blocks_check(fieldbus->kp_amps))
+   {
+      return FALSE;
+   }
+#elif EXPERIMENT_MODE == EXPERIMENT_NOISE
+   printf("\nExperiment: noise, 0 A with the drive enabled for %.2f s\n", RUN_DURATION_S);
 #endif
    printf("Bias window: %.1f s at 0 A before the experiment (t < 0) to measure the accelerometer offset\n",
           BIAS_IDLE_S);
