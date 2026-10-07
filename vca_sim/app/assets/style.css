@@ -1,0 +1,55 @@
+/* VCA simulator: light theme, neutral surfaces, text in ink tokens (series colours only on marks). */
+:root {
+  --surface-1: #fcfcfb;
+  --surface-2: #f3f2ef;
+  --border: #e0dfdb;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --accent: #2a78d6;
+  --bad: #d03b3b;
+  --warn-bg: #fff4dc;
+  --bad-bg: #fde8e8;
+  --ok-bg: #e7f4e7;
+}
+body { margin: 0; background: var(--surface-1); color: var(--text-primary);
+       font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.page { display: flex; min-height: 100vh; }
+.sidebar { width: 380px; flex: none; padding: 12px 14px; background: var(--surface-2);
+           border-right: 1px solid var(--border); overflow-y: auto; max-height: 100vh; box-sizing: border-box; }
+.sidebar h1 { font-size: 18px; margin: 4px 0 10px; }
+.sidebar h4 { margin: 8px 0 2px; font-size: 12px; color: var(--text-secondary); }
+.main { flex: 1; min-width: 0; padding: 12px 16px; }
+.section { border-bottom: 1px solid var(--border); padding: 6px 0 8px; }
+.section > summary { font-weight: 600; cursor: pointer; padding: 2px 0 6px; }
+.row, .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+.grow { flex: 1; min-width: 160px; }
+.tool-field { display: flex; flex-direction: column; gap: 2px; }
+.tool-field label { color: var(--text-secondary); font-size: 12px; }
+.toolbar { align-items: flex-end; }
+.field { display: grid; grid-template-columns: 120px 1fr 56px; gap: 6px; align-items: center; margin: 3px 0; }
+.field-label { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.field-input { width: 100%; box-sizing: border-box; padding: 3px 5px; border: 1px solid var(--border);
+               border-radius: 4px; font: inherit; background: #fff; }
+.field-unit { color: var(--text-secondary); font-size: 12px; }
+.note { color: var(--text-secondary); font-size: 12px; margin: 4px 0; }
+.note > div { margin: 2px 0; }
+.check label { margin-right: 10px; }
+button { padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; background: #fff;
+         font: inherit; cursor: pointer; }
+button:hover { border-color: var(--text-secondary); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.small { padding: 3px 8px; font-size: 12px; }
+.status { margin-bottom: 8px; }
+.status > div, .status-ok, .status-bad, .status-warn { padding: 5px 8px; border-radius: 4px; margin: 3px 0; }
+.status-ok { background: var(--ok-bg); }
+.status-bad { background: var(--bad-bg); }
+.status-warn { background: var(--warn-bg); }
+.pins label { margin-right: 14px; }
+.table-wrap { overflow-x: auto; margin: 8px 0; }
+.table { border-collapse: collapse; font-size: 12px; }
+.table th, .table td { border-bottom: 1px solid var(--border); padding: 3px 8px; text-align: right; white-space: nowrap; }
+.table th { color: var(--text-secondary); font-weight: 600; }
+.table td:first-child, .table th:first-child { text-align: left; }
+.settings { background: var(--surface-2); padding: 10px; border-radius: 4px; font-size: 12px; overflow-x: auto; }
+@media (max-width: 900px) { .page { flex-direction: column; } .sidebar { width: auto; max-height: none; } }
+.equation { overflow-x: auto; color: var(--text-primary); font-size: 13px; margin: 2px 0 6px; }

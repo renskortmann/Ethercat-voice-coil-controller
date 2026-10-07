@@ -1,0 +1,13 @@
+# Python tooling: sys id notebooks and the simulator (vca_sim). Versions as installed in .venv (Python 3.12).
+numpy>=2.5
+scipy>=1.18
+pandas>=3.0
+matplotlib>=3.11
+ipykernel
+pytest
+nbformat
+nbclient
+# simulator app
+dash
+plotly
+waitress
