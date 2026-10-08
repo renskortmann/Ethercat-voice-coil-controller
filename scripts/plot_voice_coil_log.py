@@ -52,6 +52,9 @@ AXES = [
             "actual current": ("actual_current_A", "tab:blue"),
             "target current": ("target_current_A", "tab:orange"),
             "demand current": ("demand_current_A", "tab:green"),
+            # Position-control runs only (nan, so not drawn, in other logs). Computed from this
+            # row's position and sent to the drive one cycle later.
+            "PI output": ("pid_output_A", "tab:purple"),
         },
     ),
     (
@@ -60,6 +63,7 @@ AXES = [
         {
             "ai1_mm": (None, "tab:brown"),
             "ai1_mm_lp": (None, "black"),
+            "position ref": ("position_ref_mm", "tab:red"),  # position-control runs only
         },
     ),
     (

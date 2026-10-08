@@ -111,6 +111,9 @@ Four experiments are available, selected at compile time with `EXPERIMENT_MODE`:
   each bit held for `PRBS_HOLD_CYCLES` cycles. The spectrum is flat up to about
   `PRBS_BANDWIDTH_HZ` (sinc² roll-off, about 2 dB down at the band edge). The seed is fixed, so
   every run commands the same sequence. After `PRBS_DURATION_S` the current is 0 A.
+- `EXPERIMENT_POSITION_PID` — closed-loop position control: a PI controller on the laser
+  position (AI1) makes `position_mm` follow a compile-time reference (steps or sine), with a
+  position trip at ±10 mm. See [docs/position-control.md](docs/position-control.md).
 
 ## Real-time setup
 

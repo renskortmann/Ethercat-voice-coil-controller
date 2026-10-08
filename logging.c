@@ -15,10 +15,12 @@
  *  \param tx Pointer to received TxPDO data
  *  \param cycle_jitter_us Signed offset between actual and scheduled cycle time (positive = late)
  *  \param pdo_exchange_us Time spent in send + receive processdata this cycle (frame round-trip)
+ *  \param pid Position controller values for this cycle, or NULL outside a position-control run
+ *         (the PID columns are then nan)
  */
 void
 log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
-           double cycle_jitter_us, double pdo_exchange_us)
+           double cycle_jitter_us, double pdo_exchange_us, const pid_log_t *pid)
 {
    if (fieldbus->sample_count < MAX_SAMPLES)
    {
@@ -33,7 +35,7 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
       double ai1_value_V = tx->ai1_value / DAI_SCALE;
       double ai2_value_V = tx->ai2_value / DAI_SCALE;
       /* Laser distance (mm) from the AI1 voltage, re-referenced to the rest position (see main.h). */
-      double position_mm = AI1_POSITION_SIGN * (AI1_MM_SCALE * ai1_value_V + AI1_MM_OFFSET - AI1_CENTRE_MM);
+      double position_mm = ai1_raw_to_position_mm(tx->ai1_value);
       /* DV1 units (Appendix A, Table A.1): volts = raw * 1.05 * K_OV / 2^14 */
       double dc_bus_voltage_V = tx->dc_bus_voltage_raw * 1.05 * fieldbus->kov_volts / DV1_BASE;
 
@@ -63,6 +65,11 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
       fieldbus->samples[fieldbus->sample_count].cycle_jitter_us = cycle_jitter_us;
       fieldbus->samples[fieldbus->sample_count].pdo_exchange_us = pdo_exchange_us;
       fieldbus->samples[fieldbus->sample_count].position_mm = position_mm;
+      fieldbus->samples[fieldbus->sample_count].position_ref_mm = pid ? pid->position_ref_mm : NAN;
+      fieldbus->samples[fieldbus->sample_count].pid_p_A = pid ? pid->p_A : NAN;
+      fieldbus->samples[fieldbus->sample_count].pid_i_A = pid ? pid->i_A : NAN;
+      fieldbus->samples[fieldbus->sample_count].pid_output_A = pid ? pid->output_A : NAN;
+      fieldbus->samples[fieldbus->sample_count].position_filt_mm = pid ? pid->position_filt_mm : NAN;
       fieldbus->sample_count++;
    }
 }
@@ -133,7 +140,7 @@ compute_ai2_bias_V(const Fieldbus *fieldbus)
 /** \brief Write sample and fault buffers to CSV files in CSV_DIR, and print fault events
  *  File names carry the compile-time experiment tag (EXPERIMENT_TAG: mode + parameters) followed
  *  by a wall-clock timestamp, so a directory listing shows what each run was. Creates two files:
- *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ..., position_mm, ai2_corrected_V)
+ *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ..., position_mm, ai2_corrected_V, position_ref_mm, pid_p_A, pid_i_A, pid_output_A, position_filt_mm)
  *      scripts/benchmark-rt.sh reads cycle_jitter_us and pdo_exchange_us by column number (10 and 11),
  *      so new columns must be appended, not inserted.
  *      Rows with time_s < 0 are the 0 A bias idle window (BIAS_IDLE_S). ai2_corrected_V is
@@ -167,10 +174,10 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm,ai2_corrected_V\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm,ai2_corrected_V,position_ref_mm,pid_p_A,pid_i_A,pid_output_A,position_filt_mm\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f,%.4f,%.6f\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f,%.4f,%.6f,%.4f,%.6f,%.6f,%.6f,%.4f\n",
                  fieldbus->samples[i].timestamp_s,
                  fieldbus->samples[i].actual_current_A,
                  fieldbus->samples[i].target_current_A,
@@ -183,7 +190,12 @@ export_csv(Fieldbus *fieldbus)
                  fieldbus->samples[i].cycle_jitter_us,
                  fieldbus->samples[i].pdo_exchange_us,
                  fieldbus->samples[i].position_mm,
-                 fieldbus->samples[i].ai2_value_V - ai2_bias_V);
+                 fieldbus->samples[i].ai2_value_V - ai2_bias_V,
+                 fieldbus->samples[i].position_ref_mm,
+                 fieldbus->samples[i].pid_p_A,
+                 fieldbus->samples[i].pid_i_A,
+                 fieldbus->samples[i].pid_output_A,
+                 fieldbus->samples[i].position_filt_mm);
       }
       fclose(fp);
       printf("Wrote %d samples to %s\n", fieldbus->sample_count, sample_file);
@@ -195,7 +207,8 @@ export_csv(Fieldbus *fieldbus)
 
    /* Write fault log. Also prints each fault to console here (deferred from log_fault(),
     * which is called from inside the real-time cyclic loop and must not block on I/O). */
-   const char *fault_names[] = {"WKC_ERROR", "ALstatuscode_CHANGE", "STATE_DRIFT", "DRIVE_STATUS_FLAG"};
+   const char *fault_names[] = {"WKC_ERROR", "ALstatuscode_CHANGE", "STATE_DRIFT", "DRIVE_STATUS_FLAG",
+                                "POSITION_LIMIT"};
    const char *recovery_names[] = {"NONE", "AUTO_RECOVER", "SHUTDOWN_INITIATED"};
 
    snprintf(fault_file, sizeof(fault_file), "%s/voice_coil_faults_%s_%s.csv", CSV_DIR, EXPERIMENT_TAG, timestamp);
