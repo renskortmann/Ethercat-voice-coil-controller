@@ -5,7 +5,8 @@ Two uses:
 
 * Preview, before a run (no hardware, no log):
       python scripts/plot_voice_coil_log_ref_track.py --preview
-  Reads the reference settings straight from main.h (POS_REF_SHAPE, POS_REF_STEPS,
+  Reads the reference settings straight from the firmware settings headers
+  (run_settings.h, closed_loop_settings.h) (POS_REF_SHAPE, POS_REF_STEPS,
   POS_REF_RAMP_S, POS_REF_SINE_*, POS_REF_CHIRP_*, RUN_DURATION_S, BIAS_IDLE_S) and plots the
   reference the controller will track, with the allowed reference window and the
   position trip limits. Also prints the breakpoint table.
@@ -20,8 +21,8 @@ Two uses:
   used (notched or EKF if enabled), when the log has it; older logs show a 60 Hz
   low-pass of the raw position instead.
   The reference comes from the log's position_ref_mm column, i.e. exactly what the
-  controller used. If the log has no such column it falls back to the main.h
-  reference and says so. If main.h has changed since the run, a note is printed.
+  controller used. If the log has no such column it falls back to the programmed
+  reference and says so. If the settings have changed since the run, a note is printed.
   If the run used the EKF (POS_KF_ENABLE, kf_* columns finite) a second figure shows how well
   the filter worked, from t >= 0 (as in the Kalman cell of vca_greybox_fit.ipynb):
     innovation y(k) - x(k|k-1) against time, with +/- 2 predicted std (sqrt S)
@@ -32,9 +33,9 @@ Two uses:
   For chirp runs (posPI_chirp in the file name) it also prints and plots the tracking
   per frequency: amplitude of position / reference and phase lag, fitted in windows
   of a few periods around 1, 1.5, 2, 3 ... 10 Hz. That analysis uses only the logged
-  reference and position, not main.h.
+  reference and position, not the settings headers.
 
-The reference semantics mirror pos_ref_mm() in control_loop.c: at each breakpoint
+The reference semantics mirror pos_ref_mm() in closed_loop_position.c: at each breakpoint
 the reference ramps linearly from the previous value over POS_REF_RAMP_S and then
 holds; the last value holds to the end. The controller is off (reference nan)
 during the 0 A idle window at t < 0.
@@ -54,14 +55,16 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_voice_coil_log import REPO_ROOT, latest_log, low_pass  # noqa: E402
 
-MAIN_H = os.path.join(REPO_ROOT, "main.h")
+# The #define names the firmware uses, read from its settings headers
+SETTINGS_H = [os.path.join(REPO_ROOT, n) for n in ("run_settings.h", "closed_loop_settings.h")]
 POSITION_LP_CUTOFF_HZ = 60.0  # same low-pass as the position trace in plot_voice_coil_log.py
 PREVIEW_DT_S = 0.005
 
 
-def read_main_h(path: str = MAIN_H) -> dict:
-    """Reference settings from main.h, using the same #define names as the firmware."""
-    text = open(path).read()
+def read_settings(paths: list = SETTINGS_H) -> dict:
+    """Reference settings from the firmware settings headers, using the same #define names."""
+    text = "\n".join(open(p).read() for p in paths)
+    path = " / ".join(os.path.basename(p) for p in paths)
 
     def define(name: str) -> str:
         m = re.search(rf"^#define\s+{name}\s+(.+?)\s*(?:/\*.*)?(?://.*)?$", text, re.MULTILINE)
@@ -104,7 +107,7 @@ def read_main_h(path: str = MAIN_H) -> dict:
 
 
 def chirp_phase(cfg: dict, tau: float) -> float:
-    """Exponential sweep phase, mirroring exp_chirp_phase() in control_loop.c."""
+    """Exponential sweep phase, mirroring exp_chirp_phase() in waveforms.h."""
     f0, f1, T = cfg["chirp_f0_hz"], cfg["chirp_f1_hz"], cfg["chirp_duration_s"]
     L = T / math.log(f1 / f0)
     return 2 * math.pi * f0 * L * (math.exp(tau / L) - 1.0)
@@ -119,7 +122,7 @@ def chirp_end_s(cfg: dict) -> float:
 
 
 def reference_mm(cfg: dict, t: float) -> float:
-    """Reference at time t, mirroring pos_ref_mm() in control_loop.c (nan in the idle window)."""
+    """Reference at time t, mirroring pos_ref_mm() in closed_loop_position.c (nan in the idle window)."""
     if t < 0.0:
         return float("nan")
     if cfg["shape"] == "chirp":
@@ -210,7 +213,7 @@ def preview(cfg: dict) -> None:
     ax.text(t[0] / 2, 0.02, "idle (0 A)", transform=ax.get_xaxis_transform(), ha="center", fontsize="small", color="0.4")
     ax.set_xlabel("time_s (s)")
     ax.set_ylabel("position_mm (mm)")
-    ax.set_title("Programmed position reference (from main.h, not from a run)")
+    ax.set_title("Programmed position reference (from the settings headers, not from a run)")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize="small")
     fig.tight_layout()
@@ -369,13 +372,13 @@ def tracking(cfg: dict, path: str) -> None:
     from_main_h = [reference_mm(cfg, x) for x in t]
     if not any(math.isfinite(v) for v in r):
         print("note: this log has no position_ref_mm column (not a position-control run); "
-              "showing the CURRENT main.h reference instead")
+              "showing the CURRENT settings-header reference instead")
         r = from_main_h
     else:
         diff = max((abs(a - b) for a, b in zip(r, from_main_h) if math.isfinite(a) and math.isfinite(b)), default=0.0)
         if diff > 1e-3:
-            print(f"note: main.h's reference differs from this run's by up to {diff:.3f} mm "
-                  "(main.h changed since the run); plotting the run's own reference")
+            print(f"note: the settings headers' reference differs from this run's by up to {diff:.3f} mm "
+                  "(settings changed since the run); plotting the run's own reference")
 
     # Logs with position_filt_mm: show and use exactly the position the PI acted on (notched, EKF or raw).
     # Older logs: fall back to a 60 Hz low-pass of the raw position, for display only.
@@ -455,9 +458,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("log", nargs="?", help="log CSV (default: newest in gcsc_data/)")
     parser.add_argument("--preview", action="store_true",
-                        help="plot the reference programmed in main.h, without a log")
+                        help="plot the reference programmed in closed_loop_settings.h, without a log")
     args = parser.parse_args()
-    cfg = read_main_h()
+    cfg = read_settings()
     if args.preview:
         preview(cfg)
     else:

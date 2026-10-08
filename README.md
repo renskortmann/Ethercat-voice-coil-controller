@@ -62,7 +62,7 @@ to `data/`:
 - `voice_coil_faults_<experiment>_YYYYMMDD_HHMMSS.csv` — fault events with recovery action
 
 `<experiment>` is the compile-time experiment mode and its parameters (`EXPERIMENT_TAG` in
-`main.h`), so a directory listing shows what each run was. Examples:
+`open_loop_current.h` / `closed_loop_position.h`), so a directory listing shows what each run was. Examples:
 
 - `voice_coil_log_sine_15.0Hz_5.0A_20260923_132459.csv`
 - `voice_coil_log_step_release_hold6.0A_ramp0.2s_dur3.0s_20260923_131834.csv`
@@ -71,7 +71,18 @@ to `data/`:
 
 ## Configuration
 
-Runtime parameters are compile-time constants in [main.h](main.h):
+Runtime parameters are compile-time constants. Rebuild after changing them. The settings are
+split by what they control:
+
+| File | Contains |
+|---|---|
+| [run_settings.h](run_settings.h) | `EXPERIMENT_MODE` (which experiment), `RUN_DURATION_S`, `BIAS_IDLE_S` |
+| [open_loop_settings.h](open_loop_settings.h) | Current-waveform experiments: one section each for sine, step-release, chirp, scheduled chirp, sine blocks, PRBS |
+| [closed_loop_settings.h](closed_loop_settings.h) | Position control (`EXPERIMENT_POSITION_PID`): reference, controller and gains, position filters, safety limits; see [docs/position-control.md](docs/position-control.md) |
+| [vca_model.h](vca_model.h) | Fitted plant model used by the position EKF (only after a new fit) |
+| [main.h](main.h) | `CYCLE_TIME_MS`, `RT_CPU_CORE`, AI1 laser calibration, and the fieldbus definitions |
+
+Main constants:
 
 | Constant | Default | Meaning |
 |---|---|---|
@@ -150,10 +161,17 @@ handles logs with and without that window. See [docs/accelerometer-bias.md](docs
 | `fieldbus.c` | EtherCAT lifecycle: init, discovery, state management |
 | `amc_config.c` | AMC drive SDO configuration (PO2SOconfig hook) |
 | `cia402.c` | CiA 402 state-machine bring-up |
-| `control_loop.c` | Real-time cyclic loop: waveform, PDO exchange, fault + timing monitoring |
+| `control_loop.c` | Real-time cyclic loop: setpoint, PDO exchange, fault + timing monitoring |
+| `open_loop_current.c` | Current waveform per cycle for the open-loop experiments, their startup checks |
+| `closed_loop_position.c` | Position control around the controller: reference, position trip, EKF -> notch -> controller |
+| `controller_pi.c` | PI position controller (one `controller_<name>.c` per controller, interface in `controller.h`) |
+| `notch.c` | Biquad notch filters in cascade |
+| `vca_ekf.c` | Position EKF on the fitted voice-coil model |
+| `waveforms.h` | Breakpoint-table and exponential-chirp helpers shared by both experiment types |
 | `diagnostics.c` | Fault decoding and post-fault SDO diagnostics |
 | `logging.c` | In-memory sample/fault buffers and CSV export |
-| `main.h` | Shared types, PDO layouts, object indices, configuration constants |
+| `main.h` | Shared types, PDO layouts, object indices, cycle time and calibration constants |
+| `*_settings.h`, `vca_model.h` | Experiment settings (see [Configuration](#configuration)) |
 
 ## Reference documentation
 

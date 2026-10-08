@@ -97,7 +97,7 @@ A notch removes one frequency and leaves the rest almost untouched. A low-pass w
 - **Combined with the notch.** With both on, the order is EKF → notch: the EKF gets the raw position and the notch filters x(k|k) before the PI. Not the other way round: a notch in front would change the measurement the EKF's model assumes (gain and phase around the notch frequency), make the innovations coloured, and break the innovation check below. Under test: notches at 50 and 150 Hz to remove the mains pickup and its harmonic that the EKF passes on (lag at 7–12 Hz about 1.1–1.9° for both together at Q = 10). File name: `..._notch50.0Hz_Q10.0_notch150.0Hz_Q10.0_kf`. If this works only partly, the next step is a 150 Hz (and 50 Hz) disturbance oscillator in the EKF's measurement model instead of the notch.
 
 - **What it is.** A C port of `ekf()` in `vca_greybox_fit.ipynb`. It is an extended Kalman filter with state [x, v] and measurement y = x, running every cycle (0.5 ms) on the **raw** laser position. Like the notch, it starts in the first idle-window cycle, seeded with the first sample at rest.
-- **Model.** Method C, with the fitted parameters hard-coded as `VCA_*` in `main.h` (m = 51.5 kg, Γ = 200.9 N/A, Γ₁ = 3573 N/(A·m), c = 1586.3 N·s/m, C_R = 0.001604 N·m³, C_L = 0.001574 N·m³, g₀ = 22.3 mm):
+- **Model.** Method C, with the fitted parameters hard-coded as `VCA_*` in `vca_model.h` (m = 51.5 kg, Γ = 200.9 N/A, Γ₁ = 3573 N/(A·m), c = 1586.3 N·s/m, C_R = 0.001604 N·m³, C_L = 0.001574 N·m³, g₀ = 22.3 mm):
   m ẍ = (Γ + Γ₁x) i − c ẋ − (C_R/(g₀−x)³ − C_L/(g₀+x)³).
   - Predict step: one RK4 step, with the input held over the step.
   - Covariance: F = I + A·Ts + (A·Ts)²/2, linearised at the predicted state.
@@ -263,25 +263,30 @@ The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0
 
 `position_filt_mm` in the same row is the y_f(k) the controller used, and `position_mm` is the raw measurement. Tracking error as the PI saw it = `position_ref_mm − position_filt_mm`.
 
-`scripts/plot_voice_coil_log_ref_track.py` plots tracking: the raw position, the position the PI used and the reference; the PI output with its P and I terms; and the tracking error as the PI saw it. Run it with `--preview` to plot the reference programmed in `main.h` before a run. For an EKF run it adds a second figure to check the filter. It shows the innovation over time with ±2 predicted std, its histogram against the predicted normal density, and its PSD against the white level. It also prints the RMS, the share inside ±2 std and the innovation std / predicted std ratio. `scripts/plot_voice_coil_log.py` also draws the reference over the measured position.
+`scripts/plot_voice_coil_log_ref_track.py` plots tracking: the raw position, the position the PI used and the reference; the PI output with its P and I terms; and the tracking error as the PI saw it. Run it with `--preview` to plot the reference programmed in `closed_loop_settings.h` before a run. For an EKF run it adds a second figure to check the filter. It shows the innovation over time with ±2 predicted std, its histogram against the predicted normal density, and its PSD against the white level. It also prints the RMS, the share inside ±2 std and the innovation std / predicted std ratio. `scripts/plot_voice_coil_log.py` also draws the reference over the measured position.
 
 ## 9. Where to change things
 
-All settings are `#define`s in `main.h`. Rebuild after changing them.
+All settings are `#define`s. Rebuild after changing them. The experiment selection and run length are in
+`run_settings.h`; everything specific to position control is in `closed_loop_settings.h`, ordered from
+"changed every run" (reference) via controller and filters to safety limits; the fitted model is in
+`vca_model.h` and the laser calibration in `main.h`. The code is in `closed_loop_position.c` (reference,
+trip, filter chain), `controller_pi.c` (the PI), `vca_ekf.c` and `notch.c`.
 
 | What | Setting |
 |---|---|
-| Select this experiment | `EXPERIMENT_MODE` = `EXPERIMENT_POSITION_PID` |
-| Run length (after the 3 s idle window) | `RUN_DURATION_S` (36 s; other experiments need it longer, their checks will tell you) |
+| Select this experiment | `EXPERIMENT_MODE` = `EXPERIMENT_POSITION_PID` (`run_settings.h`) |
+| Run length (after the 3 s idle window) | `RUN_DURATION_S` (`run_settings.h`) (36 s; other experiments need it longer, their checks will tell you) |
 | Reference shape | `POS_REF_SHAPE` = `POS_REF_SHAPE_STEPS`, `POS_REF_SHAPE_SINE` or `POS_REF_SHAPE_CHIRP` |
 | Step breakpoints | `POS_REF_STEPS(X)`: `X(time_s, position_mm)` entries, numbers with a decimal point |
 | Ramp time between steps | `POS_REF_RAMP_S` |
 | Sine reference | `POS_REF_SINE_OFFSET_MM`, `POS_REF_SINE_AMPLITUDE_MM`, `POS_REF_SINE_FREQ_HZ` |
 | Chirp reference | `POS_REF_CHIRP_OFFSET_MM`, `POS_REF_CHIRP_AMPLITUDE_MM`, `POS_REF_CHIRP_F0_HZ`, `POS_REF_CHIRP_F1_HZ`, `POS_REF_CHIRP_DURATION_S`, `POS_REF_CHIRP_START_S` (`RUN_DURATION_S` must cover start + duration) |
+| Controller | `POS_CONTROLLER` (only `POS_CONTROLLER_PI` for now) |
 | Gains | `PID_KP_A_PER_MM`, `PID_KI_A_PER_MM_S` |
 | Output current limit | `PID_OUTPUT_LIMIT_A` |
 | Allowed reference range | `POS_REF_MIN_MM`, `POS_REF_MAX_MM` |
 | Trip window and confirmation | `POS_TRIP_MIN_MM`, `POS_TRIP_MAX_MM`, `POS_TRIP_CYCLES` |
 | Position notches on/off, frequencies, widths | `POS_NOTCH_ENABLE`, `POS_NOTCHES(X)`: `X(freq_Hz, Q)` entries, numbers with a decimal point |
-| Position EKF on/off, noise, model | `POS_KF_ENABLE`, `POS_KF_SIG_A_M_S2`, `POS_KF_SIG_Y_MM`, `VCA_*` |
-| Laser calibration | `AI1_MM_SCALE`, `AI1_MM_OFFSET`, `AI1_CENTRE_MM`, `AI1_POSITION_SIGN` |
+| Position EKF on/off, noise, model | `POS_KF_ENABLE`, `POS_KF_SIG_A_M_S2`, `POS_KF_SIG_Y_MM`; model `VCA_*` in `vca_model.h` |
+| Laser calibration | `AI1_MM_SCALE`, `AI1_MM_OFFSET`, `AI1_CENTRE_MM`, `AI1_POSITION_SIGN` (`main.h`) |
