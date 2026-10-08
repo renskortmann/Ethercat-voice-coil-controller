@@ -3,6 +3,8 @@
  */
 
 #include "main.h"
+#include "open_loop_current.h"     /* EXPERIMENT_TAG for the current experiments */
+#include "closed_loop_position.h"  /* EXPERIMENT_TAG for position control */
 
 /** \brief Record one timestamped sample to the in-memory sample buffer
  *  Converts currents from raw values to physical Amps using KP scaling, the analog input
