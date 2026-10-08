@@ -17,11 +17,18 @@ Two uses:
     current (A)    -- PI output, its P and I terms, and the measured coil current
     error (mm)     -- reference - position (low-pass), the tracking error
   The position trace and the error use position_filt_mm, the position the PI actually
-  used (notched if POS_NOTCH_ENABLE), when the log has it; older logs show a 60 Hz
+  used (notched or EKF if enabled), when the log has it; older logs show a 60 Hz
   low-pass of the raw position instead.
   The reference comes from the log's position_ref_mm column, i.e. exactly what the
   controller used. If the log has no such column it falls back to the main.h
   reference and says so. If main.h has changed since the run, a note is printed.
+  If the run used the EKF (POS_KF_ENABLE, kf_* columns finite) a second figure shows how well
+  the filter worked, from t >= 0 (as in the Kalman cell of vca_greybox_fit.ipynb):
+    innovation y(k) - x(k|k-1) against time, with +/- 2 predicted std (sqrt S)
+    histogram of the innovation with the normal density the filter predicts
+    PSD of the innovation with the white-noise level at the predicted std
+  and prints the innovation RMS, the share inside +/- 2 std (95 % if consistent) and
+  innovation std / predicted std (1 if SIG_A and SIG_Y fit the data; >> 1: model error).
   For chirp runs (posPI_chirp in the file name) it also prints and plots the tracking
   per frequency: amplitude of position / reference and phase lag, fitted in windows
   of a few periods around 1, 1.5, 2, 3 ... 10 Hz. That analysis uses only the logged
@@ -278,9 +285,82 @@ def chirp_tracking(t: list[float], r: list[float], y: list[float]) -> list[tuple
     return out
 
 
+KF_PSD_NPERSEG = 4096  # samples per Welch segment: 2.05 s at 2 kHz, 0.49 Hz resolution
+
+
+def welch_psd(x, fs: float, nperseg: int):
+    """One-sided Welch PSD (Hann window, 50 % overlap, mean removed per segment), numpy only."""
+    import numpy as np
+
+    x = np.asarray(x, dtype=float)
+    nperseg = min(nperseg, len(x))
+    win = np.hanning(nperseg)
+    scale = 1.0 / (fs * np.sum(win ** 2))
+    starts = range(0, len(x) - nperseg + 1, nperseg // 2)
+    P = np.mean([np.abs(np.fft.rfft((x[s:s + nperseg] - x[s:s + nperseg].mean()) * win)) ** 2 for s in starts], axis=0)
+    P *= scale
+    P[1:-1 if nperseg % 2 == 0 else None] *= 2.0
+    return np.fft.rfftfreq(nperseg, 1.0 / fs), P
+
+
+def kf_diagnostics(path: str, t: list[float], c: dict) -> None:
+    """Second figure for EKF runs: innovation against time with +/- 2 predicted std, its histogram
+    against the predicted normal density, and its PSD against the white level at the predicted std."""
+    import numpy as np
+
+    t = np.asarray(t)
+    e = np.asarray(c["kf_innovation_mm"])
+    sd = np.asarray(c["kf_innov_std_mm"])
+    m = (t >= 0.0) & np.isfinite(e) & np.isfinite(sd)
+    if m.sum() < 10:
+        return
+    te, e, sd = t[m], e[m], sd[m]
+    s_mean = float(np.mean(sd))
+    inside = float(np.mean(np.abs(e) <= 2.0 * sd))
+    ratio = float(np.std(e)) / s_mean
+    print(f"\nEKF innovation y(k) - x(k|k-1), t >= 0: RMS {np.sqrt(np.mean(e ** 2)):.4f} mm, "
+          f"mean {np.mean(e):+.4f} mm, inside +/-2 predicted std {inside * 100:.1f} % (95 % if consistent)")
+    print(f"  innovation std / predicted std = {ratio:.2f} (1 = consistent; >> 1: model error or SIG_A/SIG_Y too small; "
+          f"<< 1: too large)")
+
+    fs = 1.0 / float(np.median(np.diff(te)))
+    fig = plt.figure(figsize=(12, 8))
+    fig.suptitle(f"EKF check: {os.path.basename(path)}", fontsize="medium")
+    gs = fig.add_gridspec(2, 2, height_ratios=[1, 1])
+    ax_t = fig.add_subplot(gs[0, :])
+    ax_h = fig.add_subplot(gs[1, 0])
+    ax_f = fig.add_subplot(gs[1, 1])
+
+    ax_t.plot(te, e, color="tab:blue", lw=0.3, label="innovation y(k) - x(k|k-1)")
+    ax_t.plot(te, 2 * sd, color="black", lw=1.0, label="+/- 2 predicted std")   # on top of the dense trace
+    ax_t.plot(te, -2 * sd, color="black", lw=1.0)
+    ax_t.set(xlabel="time_s (s)", ylabel="innovation (mm)",
+             title=f"innovation, {inside * 100:.1f} % inside +/- 2 std, std ratio {ratio:.2f}")
+    ax_t.legend(loc="upper right", fontsize="small")
+
+    lim = float(np.percentile(np.abs(e), 99.5))
+    ax_h.hist(e, bins=np.linspace(-lim, lim, 101), density=True, color="tab:blue", alpha=0.7)
+    g = np.linspace(-lim, lim, 400)
+    ax_h.plot(g, np.exp(-0.5 * (g / s_mean) ** 2) / (s_mean * np.sqrt(2 * np.pi)), "k--",
+              label=f"predicted N(0, {s_mean:.4f} mm)")
+    ax_h.set(xlabel="innovation (mm)", ylabel="density",
+             title=f"histogram: mean {np.mean(e):+.4f} mm, std {np.std(e):.4f} mm")
+    ax_h.legend(fontsize="small")
+
+    f, P = welch_psd(e, fs, KF_PSD_NPERSEG)
+    ax_f.plot(f, 10 * np.log10(P + 1e-20), color="tab:blue", lw=0.8, label="innovation PSD")
+    ax_f.axhline(10 * np.log10(2 * s_mean ** 2 / fs), color="k", ls="--", label="white at predicted std")
+    ax_f.set(xlim=(0, fs / 2), xlabel="frequency (Hz)", ylabel="PSD (dB re 1 mm²/Hz)",
+             title="PSD: flat if optimal; peaks = missed dynamics or mains pickup")
+    ax_f.legend(fontsize="small")
+    for ax in (ax_t, ax_h, ax_f):
+        ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+
 def tracking(cfg: dict, path: str) -> None:
     names = ["position_mm", "position_ref_mm", "pid_p_A", "pid_i_A", "pid_output_A", "actual_current_A",
-             "position_filt_mm"]
+             "position_filt_mm", "kf_innovation_mm", "kf_innov_std_mm"]
     t, c = read_columns(path, names)
     if not t:
         sys.exit(f"no usable rows in {path}")
@@ -297,11 +377,11 @@ def tracking(cfg: dict, path: str) -> None:
             print(f"note: main.h's reference differs from this run's by up to {diff:.3f} mm "
                   "(main.h changed since the run); plotting the run's own reference")
 
-    # Logs with position_filt_mm: show and use exactly the position the PI acted on (notched or raw).
+    # Logs with position_filt_mm: show and use exactly the position the PI acted on (notched, EKF or raw).
     # Older logs: fall back to a 60 Hz low-pass of the raw position, for display only.
     if any(math.isfinite(v) for v in c["position_filt_mm"]):
         y_ctrl = c["position_filt_mm"]
-        ctrl_label = "position used by PI (notched if enabled)"
+        ctrl_label = "position used by PI (notched / EKF if enabled)"
         err_label = "error r - y (as seen by PI)"
     else:
         y_ctrl = low_pass(t, y, POSITION_LP_CUTOFF_HZ)
@@ -344,6 +424,9 @@ def tracking(cfg: dict, path: str) -> None:
     ax_cur.legend(loc="upper right", fontsize="small", ncol=2)
 
     fig.tight_layout()
+
+    if any(math.isfinite(v) for v in c["kf_innovation_mm"]):
+        kf_diagnostics(path, t, c)
 
     if "posPI_chirp" in os.path.basename(path):
         rows = chirp_tracking(t, r, y)

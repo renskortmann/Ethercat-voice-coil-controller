@@ -72,8 +72,8 @@ u  = clamp(P + I, −10 A, +10 A)
 - **Anti-windup.** When P + I would exceed ±10 A, the output is clamped. Without protection the integrator would keep growing during the clamp and then overshoot badly once the error reverses. The controller therefore skips any integrator step that would push further into saturation, and also limits I itself to ±10 A. With the default profile the output stays below 0.5 A, so this only matters if something goes wrong.
 - **No D term (yet).** The laser signal has noise and 50 Hz mains pickup on it. Differentiating it would turn that into current noise. A later D term should act on the measured position, not on the error, so that reference steps don't cause a kick. It also needs a low-pass filter.
 
-### Position filter (50 Hz notch) — currently OFF
-**Status:** the notch is switched off (`POS_NOTCH_ENABLE 0`), so the PI uses the raw position. The notch hides *real* 50 Hz motion from the PI as well as the pickup. That matters for sine references between about 40 and 60 Hz, where it removes or distorts the feedback. The code is kept; set `POS_NOTCH_ENABLE 1` to use it again for references well below 40 Hz. Measured at Kp = 1.0, 5 mm / 1 Hz sine: on vs off gave the same tracking (0.86 vs 0.87 mm rms error), with 50 Hz in the current at 1 vs 83 mA and current noise at 45 vs 80 mA rms.
+### Position filter (mains notches) — currently ON at 50 + 150 Hz, after the EKF
+**Status:** two notches in cascade behind the EKF, 50 Hz and 150 Hz, both Q = 10 (`POS_NOTCH_ENABLE 1`, `POS_NOTCHES(X) X(50.0, 10.0) X(150.0, 10.0)`), see the EKF section below. Add or remove `X(freq_Hz, Q)` entries to change the set; the file name gets one `_notch<f>Hz_Q<q>` per entry. Their lags add: together 1.1° at 7 Hz, 1.6° at 10 Hz, 1.9° at 12 Hz, 3.5° at 20 Hz. Earlier the single 50 Hz notch on the raw position was switched off, so the PI used the raw position. The notch hides *real* 50 Hz motion from the PI as well as the pickup. That matters for sine references between about 40 and 60 Hz, where it removes or distorts the feedback. The code is kept; set `POS_NOTCH_ENABLE 1` to use it again for references well below 40 Hz. Measured at Kp = 1.0, 5 mm / 1 Hz sine: on vs off gave the same tracking (0.86 vs 0.87 mm rms error), with 50 Hz in the current at 1 vs 83 mA and current noise at 45 vs 80 mA rms.
 
 The laser position carries about 80 µm rms of noise. Most of it is mains hum: 95 µm amplitude at 49.98 Hz. It is just as large at 0 A in the idle window, so it is electrical pickup, not motion. The P term passes it straight into the coil current: about 25 mA at Kp = 0.3 and about 80 mA at Kp = 1.
 
@@ -90,6 +90,25 @@ A notch removes one frequency and leaves the rest almost untouched. A low-pass w
 - **What remains.** About 42 µm of other noise, including a 150 Hz harmonic of about 50 µm amplitude that was deliberately left in.
 - **Why Q = 10 and not lower.** A wider notch (lower Q) adds more lag. At high Kp the loop has little phase margin near its 10–12 Hz mode, so every degree counts. In simulation at Kp = 1.0 with the lowest damping estimate, Q = 5 made the loop unstable, while Q = 10 and no notch both stayed stable. If you push Kp higher, watch for ringing at 10–15 Hz. `POS_NOTCH_ENABLE` 0 switches the notch off for a direct comparison.
 - **The trip ignores the filter.** The ±10 mm position trip always checks the **raw** position, so a filter can never delay it.
+
+### Position filter (EKF on the Method C model) — currently OFF
+**Status:** off (`POS_KF_ENABLE 0`). Set it to 1 to have the PI use the Kalman estimate instead of the raw position. The file name gets `_kf` when it is on.
+
+- **Combined with the notch.** With both on, the order is EKF → notch: the EKF gets the raw position and the notch filters x(k|k) before the PI. Not the other way round: a notch in front would change the measurement the EKF's model assumes (gain and phase around the notch frequency), make the innovations coloured, and break the innovation check below. Under test: notches at 50 and 150 Hz to remove the mains pickup and its harmonic that the EKF passes on (lag at 7–12 Hz about 1.1–1.9° for both together at Q = 10). File name: `..._notch50.0Hz_Q10.0_notch150.0Hz_Q10.0_kf`. If this works only partly, the next step is a 150 Hz (and 50 Hz) disturbance oscillator in the EKF's measurement model instead of the notch.
+
+- **What it is.** A C port of `ekf()` in `vca_greybox_fit.ipynb`. It is an extended Kalman filter with state [x, v] and measurement y = x, running every cycle (0.5 ms) on the **raw** laser position. Like the notch, it starts in the first idle-window cycle, seeded with the first sample at rest.
+- **Model.** Method C, with the fitted parameters hard-coded as `VCA_*` in `main.h` (m = 51.5 kg, Γ = 200.9 N/A, Γ₁ = 3573 N/(A·m), c = 1586.3 N·s/m, C_R = 0.001604 N·m³, C_L = 0.001574 N·m³, g₀ = 22.3 mm):
+  m ẍ = (Γ + Γ₁x) i − c ẋ − (C_R/(g₀−x)³ − C_L/(g₀+x)³).
+  - Predict step: one RK4 step, with the input held over the step.
+  - Covariance: F = I + A·Ts + (A·Ts)²/2, linearised at the predicted state.
+- **Input.** The model input for the step k−1 → k is the current the master **sent in cycle k−1**.
+- **Output.** The PI gets the filtered x(k|k). It is logged as `position_filt_mm`.
+- **Noise.** Both values are from the notebook.
+  - Process noise: white acceleration, `POS_KF_SIG_A_M_S2` = 7.86 m/s² (the Method C residual on its fit data).
+  - Measurement noise: `POS_KF_SIG_Y_MM` = 0.0766 mm (the raw laser in the idle window). Most of it is 50/150 Hz pickup, which is not white.
+- **Checked offline.** On the raw `data/test` logs the C code matches the notebook's `ekf()` to within 1e-12 m.
+- **Caveat.** The model is good on the scheduled chirp: one-step innovation 0.115 mm rms, innovation std / predicted std = 1.35. It is poor on the plain 1→55 Hz chirp: 1.37 mm rms, ratio 16. The position references run at 1–10 Hz, which is in that poorer range. Check the innovation ratio (`kf_innovation_mm` / `kf_innov_std_mm`) of the first run before trusting the estimate.
+- **The trip ignores the filter**, as with the notch.
 
 ### Drive and plant
 - **Drive.** The drive (AMC, CST mode) has its own fast current loop. Here it is treated as ideal: the actual current equals the command. Measured: a 3.0 A command gives 2.995 A.
@@ -117,7 +136,7 @@ The PC runs one real-time loop on a dedicated CPU core, woken every 0.5 ms by an
    ├─ 3. communication checks (working counter, drive state)              │
    ├─ 4. AI1 raw → volts → y(k) in mm                                     │
    ├─ 5. position trip check on the raw y(k)                              │
-   ├─ 6. 50 Hz notch: y(k) → y_f(k)  (runs in the idle window too)        │
+   ├─ 6. 50 Hz notch or EKF: y(k) → y_f(k)  (runs in the idle window too) │
    ├─ 7. r(k) = reference at this time; PI on y_f(k) → u(k), stored for   │
    │     the next cycle                                                   │
    ├─ 8. timing measurement, then log one row (y, y_f, r, P, I, u)        │
@@ -229,7 +248,7 @@ The 3-cycle confirmation keeps a single noise spike from stopping the run. 1.5 m
 
 ## 8. Reading the log
 
-The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0.0mm-8.0s1.0mm-17.0s-1.0mm-26.0s0.0mm-r0.0s_kp0.02_ki0.2_notch50.0Hz_Q10.0_<date>_<time>.csv` (the `_notch...` part only when the notch is on). It has five new columns at the end (all other modes write `nan` in them):
+The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0.0mm-8.0s1.0mm-17.0s-1.0mm-26.0s0.0mm-r0.0s_kp0.02_ki0.2_notch50.0Hz_Q10.0_<date>_<time>.csv` (the `_notch...` part only when the notch is on, `_kf` only when the EKF is on). It has eight new columns at the end (all other modes write `nan` in them):
 
 | Column | Meaning |
 |---|---|
@@ -237,11 +256,14 @@ The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0
 | `pid_p_A` | P term |
 | `pid_i_A` | integrator after this cycle's update |
 | `pid_output_A` | u(k), the clamped output. **Sent to the drive in the next cycle.** `target_current_A` (the drive's echo) shows it a row or two later. |
-| `position_filt_mm` | y_f(k), the position the PI used: notched if `POS_NOTCH_ENABLE` is 1, otherwise equal to `position_mm` |
+| `position_filt_mm` | y_f(k), the position the PI used: the EKF estimate x(k|k) if `POS_KF_ENABLE` is 1, otherwise `position_mm`; then notched if `POS_NOTCH_ENABLE` is 1 |
+| `kf_velocity_mm_s` | EKF velocity estimate v(k|k) (`nan` unless `POS_KF_ENABLE`) |
+| `kf_innovation_mm` | EKF innovation y(k) − x(k|k−1) (`nan` unless `POS_KF_ENABLE`) |
+| `kf_innov_std_mm` | EKF predicted innovation std √S; the innovation should stay mostly within ±2 of these (`nan` unless `POS_KF_ENABLE`) |
 
 `position_filt_mm` in the same row is the y_f(k) the controller used, and `position_mm` is the raw measurement. Tracking error as the PI saw it = `position_ref_mm − position_filt_mm`.
 
-`scripts/plot_voice_coil_log_ref_track.py` plots tracking: the raw position, the position the PI used and the reference; the PI output with its P and I terms; and the tracking error as the PI saw it. Run it with `--preview` to plot the reference programmed in `main.h` before a run. `scripts/plot_voice_coil_log.py` also draws the reference over the measured position.
+`scripts/plot_voice_coil_log_ref_track.py` plots tracking: the raw position, the position the PI used and the reference; the PI output with its P and I terms; and the tracking error as the PI saw it. Run it with `--preview` to plot the reference programmed in `main.h` before a run. For an EKF run it adds a second figure to check the filter. It shows the innovation over time with ±2 predicted std, its histogram against the predicted normal density, and its PSD against the white level. It also prints the RMS, the share inside ±2 std and the innovation std / predicted std ratio. `scripts/plot_voice_coil_log.py` also draws the reference over the measured position.
 
 ## 9. Where to change things
 
@@ -260,5 +282,6 @@ All settings are `#define`s in `main.h`. Rebuild after changing them.
 | Output current limit | `PID_OUTPUT_LIMIT_A` |
 | Allowed reference range | `POS_REF_MIN_MM`, `POS_REF_MAX_MM` |
 | Trip window and confirmation | `POS_TRIP_MIN_MM`, `POS_TRIP_MAX_MM`, `POS_TRIP_CYCLES` |
-| Position notch on/off, frequency, width | `POS_NOTCH_ENABLE`, `POS_NOTCH_FREQ_HZ`, `POS_NOTCH_Q` |
+| Position notches on/off, frequencies, widths | `POS_NOTCH_ENABLE`, `POS_NOTCHES(X)`: `X(freq_Hz, Q)` entries, numbers with a decimal point |
+| Position EKF on/off, noise, model | `POS_KF_ENABLE`, `POS_KF_SIG_A_M_S2`, `POS_KF_SIG_Y_MM`, `VCA_*` |
 | Laser calibration | `AI1_MM_SCALE`, `AI1_MM_OFFSET`, `AI1_CENTRE_MM`, `AI1_POSITION_SIGN` |

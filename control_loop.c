@@ -339,63 +339,193 @@ clamp_abs(double x, double limit)
 }
 
 #if POS_NOTCH_ENABLE
-/** \brief Position notch filter: biquad notch at POS_NOTCH_FREQ_HZ (RBJ cookbook, bilinear transform at
- *  the cycle rate), Direct Form II transposed. DC gain is exactly 1, so a constant position passes
- *  unchanged. */
-static struct
+/** \brief Position notch filters from POS_NOTCHES, in cascade: each a biquad notch (RBJ cookbook,
+ *  bilinear transform at the cycle rate), Direct Form II transposed. DC gain is exactly 1, so a constant
+ *  position passes unchanged. */
+typedef struct
 {
+   double freq_Hz, q;           /**< Centre frequency and quality factor, from POS_NOTCHES */
    double b0, b1, b2, a1, a2;   /**< Coefficients normalised to a0 = 1 */
    double z1, z2;               /**< Filter state */
    boolean seeded;              /**< FALSE until the first sample has set the state */
-} notch;
+} notch_t;
+
+#define NOTCH_ENTRY_(f_, q_) { .freq_Hz = f_, .q = q_ },
+static notch_t notches[] = { POS_NOTCHES(NOTCH_ENTRY_) };
+#define NOTCH_COUNT ((int)(sizeof(notches) / sizeof(notches[0])))
 
 /** \brief Compute the notch coefficients; call once before the cyclic loop */
 static void
 notch_init(void)
 {
    const double fs_Hz = 1000.0 / CYCLE_TIME_MS;
-   double w0 = 2.0 * M_PI * POS_NOTCH_FREQ_HZ / fs_Hz;
-   double alpha = sin(w0) / (2.0 * POS_NOTCH_Q);
-   double a0 = 1.0 + alpha;
-   notch.b0 = 1.0 / a0;
-   notch.b1 = -2.0 * cos(w0) / a0;
-   notch.b2 = 1.0 / a0;
-   notch.a1 = -2.0 * cos(w0) / a0;
-   notch.a2 = (1.0 - alpha) / a0;
-   notch.seeded = FALSE;
+   for (int i = 0; i < NOTCH_COUNT; i++)
+   {
+      notch_t *n = &notches[i];
+      double w0 = 2.0 * M_PI * n->freq_Hz / fs_Hz;
+      double alpha = sin(w0) / (2.0 * n->q);
+      double a0 = 1.0 + alpha;
+      n->b0 = 1.0 / a0;
+      n->b1 = -2.0 * cos(w0) / a0;
+      n->b2 = 1.0 / a0;
+      n->a1 = -2.0 * cos(w0) / a0;
+      n->a2 = (1.0 - alpha) / a0;
+      n->seeded = FALSE;
+   }
 }
 
 /** \brief Set the state as if the input had been constant at x forever, so the output starts at x
  *  without a transient */
 static void
-notch_seed(double x)
+notch_seed(notch_t *n, double x)
 {
-   notch.z2 = (notch.b2 - notch.a2) * x;
-   notch.z1 = (notch.b1 - notch.a1) * x + notch.z2;
-   notch.seeded = TRUE;
+   n->z2 = (n->b2 - n->a2) * x;
+   n->z1 = (n->b1 - n->a1) * x + n->z2;
+   n->seeded = TRUE;
 }
 
-/** \brief Filter one position sample
- *  \param x Raw position in mm
+/** \brief Filter one position sample through every notch in turn
+ *  \param x Position in mm (raw, or the EKF x(k|k))
  *  \return Notched position in mm
  */
 static double
 notch_step(double x)
 {
-   if (!notch.seeded)
+   for (int i = 0; i < NOTCH_COUNT; i++)
    {
-      notch_seed(x);
+      notch_t *n = &notches[i];
+      if (!n->seeded)
+      {
+         notch_seed(n, x);
+      }
+      double y = n->b0 * x + n->z1;
+      n->z1 = n->b1 * x - n->a1 * y + n->z2;
+      n->z2 = n->b2 * x - n->a2 * y;
+      if (!isfinite(y))
+      {
+         /* Cannot happen with a valid int16 AI1 reading; restart from this notch's input. */
+         notch_seed(n, x);
+         y = x;
+      }
+      x = y;
    }
-   double y = notch.b0 * x + notch.z1;
-   notch.z1 = notch.b1 * x - notch.a1 * y + notch.z2;
-   notch.z2 = notch.b2 * x - notch.a2 * y;
-   if (!isfinite(y))
+   return x;
+}
+#endif
+
+#if POS_KF_ENABLE
+/** \brief Position EKF: port of ekf() in vca_greybox_fit.ipynb (Method C model, state [x, v],
+ *  measurement x, white acceleration process noise). Runs in SI units (m, m/s); mm at the interface. */
+static struct
+{
+   double x, v;                 /**< State estimate x(k|k) in m, v(k|k) in m/s */
+   double p11, p12, p22;        /**< Covariance P (symmetric) */
+   double q11, q12, q22, R;     /**< Discretised process noise and measurement variance */
+   boolean seeded;              /**< FALSE until the first sample has set the state */
+} kf;
+
+/** \brief One cycle's EKF output, in mm */
+typedef struct
+{
+   double x_mm;                 /**< Filtered position x(k|k) */
+   double v_mm_s;               /**< Filtered velocity v(k|k) */
+   double innov_mm;             /**< Innovation y(k) - x(k|k-1) */
+   double innov_std_mm;         /**< Predicted innovation std sqrt(S) */
+} kf_out_t;
+
+/** \brief Compute the noise matrices; call once before the cyclic loop */
+static void
+kf_init(void)
+{
+   const double ts = CYCLE_TIME_MS / 1000.0;
+   const double sa2 = POS_KF_SIG_A_M_S2 * POS_KF_SIG_A_M_S2;
+   kf.q11 = sa2 * ts * ts * ts * ts / 4.0;
+   kf.q12 = sa2 * ts * ts * ts / 2.0;
+   kf.q22 = sa2 * ts * ts;
+   kf.R = (POS_KF_SIG_Y_MM * 1e-3) * (POS_KF_SIG_Y_MM * 1e-3);
+   kf.seeded = FALSE;
+}
+
+/** \brief Method C acceleration in m/s^2: ((Gamma + Gamma1 x) i - c v - (C_R / (g0 - x)^3 - C_L / (g0 + x)^3)) / m */
+static double
+kf_acc(double x, double v, double u)
+{
+   double gr = VCA_GAP_M - x, gl = VCA_GAP_M + x;
+   double spring = VCA_C_R_NM3 / (gr * gr * gr) - VCA_C_L_NM3 / (gl * gl * gl);
+   return ((VCA_GAMMA_N_PER_A + VCA_GAMMA1_N_PER_AM * x) * u - VCA_DAMPING_NS_PER_M * v - spring) / VCA_MASS_KG;
+}
+
+/** \brief Start at measurement y (m), at rest, velocity std 1 cm/s (as the notebook) */
+static void
+kf_seed(double y)
+{
+   kf.x = y;
+   kf.v = 0.0;
+   kf.p11 = kf.R;
+   kf.p12 = 0.0;
+   kf.p22 = 1e-4;
+   kf.seeded = TRUE;
+}
+
+/** \brief Filter one position sample
+ *  \param y_mm Raw position in mm, received this cycle
+ *  \param u_A Current sent in the previous cycle, held over the step k-1 -> k
+ *  \return x(k|k), v(k|k), innovation and its predicted std
+ */
+static kf_out_t
+kf_step(double y_mm, double u_A)
+{
+   const double ts = CYCLE_TIME_MS / 1000.0;
+   double y = y_mm * 1e-3;
+   if (!kf.seeded)
    {
-      /* Cannot happen with a valid int16 AI1 reading; restart from the raw sample. */
-      notch_seed(x);
-      y = x;
+      kf_seed(y);                /* first sample: no predict step */
    }
-   return y;
+   else
+   {
+      /* Predict: one RK4 step of the model with u held over the step */
+      double x = kf.x, v = kf.v;
+      double k1x = v, k1v = kf_acc(x, v, u_A);
+      double k2x = v + ts / 2 * k1v, k2v = kf_acc(x + ts / 2 * k1x, v + ts / 2 * k1v, u_A);
+      double k3x = v + ts / 2 * k2v, k3v = kf_acc(x + ts / 2 * k2x, v + ts / 2 * k2v, u_A);
+      double k4x = v + ts * k3v, k4v = kf_acc(x + ts * k3x, v + ts * k3v, u_A);
+      kf.x = x + ts / 6 * (k1x + 2 * k2x + 2 * k3x + k4x);
+      kf.v = v + ts / 6 * (k1v + 2 * k2v + 2 * k3v + k4v);
+
+      /* Covariance F P F' + Q with F = I + A Ts + (A Ts)^2 / 2, A = [[0, 1], [a21, a22]] linearised at
+       * the predicted x; a21 = -dFs/dx / m with Fs = spring - Gamma1 x i */
+      double gr = VCA_GAP_M - kf.x, gl = VCA_GAP_M + kf.x;
+      double a21 = -(3.0 * VCA_C_R_NM3 / (gr * gr * gr * gr) + 3.0 * VCA_C_L_NM3 / (gl * gl * gl * gl)
+                     - VCA_GAMMA1_N_PER_AM * u_A) / VCA_MASS_KG;
+      double a22 = -VCA_DAMPING_NS_PER_M / VCA_MASS_KG;
+      double f11 = 1 + a21 * ts * ts / 2, f12 = ts + a22 * ts * ts / 2;
+      double f21 = a21 * ts + a21 * a22 * ts * ts / 2, f22 = 1 + a22 * ts + (a21 + a22 * a22) * ts * ts / 2;
+      double g11 = f11 * kf.p11 + f12 * kf.p12, g12 = f11 * kf.p12 + f12 * kf.p22;
+      double g21 = f21 * kf.p11 + f22 * kf.p12, g22 = f21 * kf.p12 + f22 * kf.p22;
+      kf.p11 = g11 * f11 + g12 * f12 + kf.q11;
+      kf.p12 = g11 * f21 + g12 * f22 + kf.q12;
+      kf.p22 = g21 * f21 + g22 * f22 + kf.q22;
+   }
+
+   /* Update with the measured position */
+   double S = kf.p11 + kf.R;
+   double k1 = kf.p11 / S, k2 = kf.p12 / S, e = y - kf.x;
+   kf.x += k1 * e;
+   kf.v += k2 * e;
+   double p11 = kf.p11, p12 = kf.p12;
+   kf.p11 = p11 - k1 * p11;
+   kf.p12 = p12 - k1 * p12;
+   kf.p22 = kf.p22 - k2 * p12;
+
+   kf_out_t out = { .x_mm = kf.x * 1e3, .v_mm_s = kf.v * 1e3, .innov_mm = e * 1e3, .innov_std_mm = sqrt(S) * 1e3 };
+   if (!isfinite(kf.x) || !isfinite(kf.v) || !isfinite(kf.p11) || !isfinite(kf.p12) || !isfinite(kf.p22)
+       || !isfinite(out.innov_std_mm))
+   {
+      /* Cannot happen inside the trip window; restart from the raw sample. */
+      kf_seed(y);
+      out = (kf_out_t){ .x_mm = y_mm, .v_mm_s = 0.0, .innov_mm = NAN, .innov_std_mm = NAN };
+   }
+   return out;
 }
 #endif
 
@@ -545,7 +675,11 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    double next_current_A = 0.0;   /* PI output from the previous cycle's measurement; 0 A until the first update */
    pid_log_t pid;                 /* this cycle's controller values, for the log */
    double position_mm;            /* raw, used by the trip check */
-   double position_filt_mm;       /* notched (POS_NOTCH_ENABLE) or raw, used by the PI */
+   double position_filt_mm;       /* EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE); used by the PI */
+#if POS_KF_ENABLE
+   kf_out_t kf_out;               /* this cycle's EKF output */
+   double kf_u_prev_A = 0.0;      /* current sent in the previous cycle: EKF input for the step k-1 -> k */
+#endif
    int pos_trip_count = 0;        /* consecutive cycles outside the trip window */
    boolean pos_trip_detected = FALSE;
    double pos_trip_position_mm = 0.0;
@@ -598,11 +732,24 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
           PID_KP_A_PER_MM, PID_KI_A_PER_MM_S, PID_OUTPUT_LIMIT_A, fieldbus->kp_amps);
    printf("  reference window %.1f .. %.1f mm, trip outside %.1f .. %.1f mm (raw position) for %d cycles\n",
           POS_REF_MIN_MM, POS_REF_MAX_MM, POS_TRIP_MIN_MM, POS_TRIP_MAX_MM, POS_TRIP_CYCLES);
+#if POS_KF_ENABLE
+   printf("  position filter: EKF on the Method C model (PI uses x(k|k)), SIG_A = %.3g m/s^2, SIG_Y = %.4f mm\n",
+          POS_KF_SIG_A_M_S2, POS_KF_SIG_Y_MM);
+   printf("    m = %.2f kg, Gamma = %.1f N/A, Gamma1 = %.4g N/(A m), c = %.1f N s/m, C_R = %.4g N m^3, "
+          "C_L = %.4g N m^3, g0 = %.1f mm\n", VCA_MASS_KG, VCA_GAMMA_N_PER_A, VCA_GAMMA1_N_PER_AM,
+          VCA_DAMPING_NS_PER_M, VCA_C_R_NM3, VCA_C_L_NM3, VCA_GAP_M * 1e3);
+   kf_init();
+#endif
 #if POS_NOTCH_ENABLE
-   printf("  position filter: notch at %.2f Hz, Q = %.2f (PI uses the notched position)\n",
-          POS_NOTCH_FREQ_HZ, POS_NOTCH_Q);
+   printf("  position filter: %d notch(es) in cascade (PI uses the notched %s)\n",
+          NOTCH_COUNT, POS_KF_ENABLE ? "EKF x(k|k)" : "raw position");
+   for (int i = 0; i < NOTCH_COUNT; i++)
+   {
+      printf("    notch at %.2f Hz, Q = %.2f\n", notches[i].freq_Hz, notches[i].q);
+   }
    notch_init();
-#else
+#endif
+#if !POS_KF_ENABLE && !POS_NOTCH_ENABLE
    printf("  position filter: off (PI uses the raw position)\n");
 #endif
 #if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
@@ -744,11 +891,17 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          pos_trip_count = 0;
       }
 
-      /* The notch runs from the first cycle, so it has settled long before the PI starts at t = 0. */
-#if POS_NOTCH_ENABLE
-      position_filt_mm = notch_step(position_mm);
+      /* The EKF and notch run from the first cycle, so they have settled long before the PI starts at t = 0.
+       * The EKF gets the raw position (its model has no notch in it); the notch then acts on x(k|k). */
+#if POS_KF_ENABLE
+      kf_out = kf_step(position_mm, kf_u_prev_A);
+      position_filt_mm = kf_out.x_mm;
+      kf_u_prev_A = target_current_A;   /* sent this cycle: acts over the step to the next measurement */
 #else
       position_filt_mm = position_mm;
+#endif
+#if POS_NOTCH_ENABLE
+      position_filt_mm = notch_step(position_filt_mm);
 #endif
 
       if (elapsed_s < 0.0)
@@ -761,6 +914,15 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          pid = pi_update(pos_ref_mm(elapsed_s), position_filt_mm);
       }
       pid.position_filt_mm = position_filt_mm;
+#if POS_KF_ENABLE
+      pid.kf_velocity_mm_s = kf_out.v_mm_s;
+      pid.kf_innovation_mm = kf_out.innov_mm;
+      pid.kf_innov_std_mm = kf_out.innov_std_mm;
+#else
+      pid.kf_velocity_mm_s = NAN;
+      pid.kf_innovation_mm = NAN;
+      pid.kf_innov_std_mm = NAN;
+#endif
       next_current_A = pid.output_A;
 #endif
 

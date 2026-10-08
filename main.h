@@ -173,7 +173,7 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #define POS_REF_CHIRP_OFFSET_MM    0.0   /**< Chirp centre, in mm */
 #define POS_REF_CHIRP_AMPLITUDE_MM 3.0   /**< Chirp amplitude, in mm */
 #define POS_REF_CHIRP_F0_HZ        1.0   /**< Start frequency in Hz (> 0) */
-#define POS_REF_CHIRP_F1_HZ        10.0  /**< End frequency in Hz */
+#define POS_REF_CHIRP_F1_HZ        5.0  /**< End frequency in Hz */
 #define POS_REF_CHIRP_DURATION_S   60.0  /**< Sweep length T in seconds */
 #define POS_REF_CHIRP_START_S      2.0   /**< Hold at the offset before the sweep starts, in seconds */
 #define PID_KP_A_PER_MM     1.0  /**< Proportional gain: Amps per mm of position error */
@@ -186,16 +186,42 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #define POS_TRIP_MIN_MM     -10.0 /**< Runtime trip: 0 A and shut down below this position, in mm */
 #define POS_TRIP_MAX_MM     10.0  /**< Runtime trip: 0 A and shut down above this position, in mm */
 #define POS_TRIP_CYCLES     3     /**< Consecutive cycles outside the trip window before tripping (rejects single noise spikes) */
-/** Notch filter on the position the PI uses, against 50 Hz mains pickup on the laser signal. A notch
- *  instead of a low-pass: it removes 50 Hz with only ~1.5 deg lag at the 7-12 Hz loop frequencies. The
- *  position trip always uses the raw, unfiltered position. See docs/position-control.md. */
-#define POS_NOTCH_ENABLE    0     /**< 1 = PI uses the notched position, 0 = PI uses the raw position */
-#define POS_NOTCH_FREQ_HZ   50.0  /**< Notch centre frequency in Hz (mains) */
-#define POS_NOTCH_Q         10.0  /**< Notch quality factor: -3 dB width = POS_NOTCH_FREQ_HZ / POS_NOTCH_Q. Higher Q = less lag at the loop frequency (Q 5 can destabilise Kp ~1 A/mm if damping is low) */
+/** Notch filters on the position the PI uses, against mains pickup on the laser signal (50 Hz and its
+ *  150 Hz harmonic). Notches instead of a low-pass: at 7-12 Hz a 50 Hz notch costs ~1.5 deg lag, a
+ *  150 Hz notch ~0.5 deg; the lags of cascaded notches add. With POS_KF_ENABLE the notches run on the
+ *  EKF output x(k|k), so the EKF still sees the raw position. The position trip always uses the raw,
+ *  unfiltered position. See docs/position-control.md. */
+#define POS_NOTCH_ENABLE    1     /**< 1 = PI uses the notched position, 0 = PI uses the raw position (or x(k|k)) */
+/** Notches in cascade, applied in this order: X(centre frequency in Hz, quality factor Q). The -3 dB
+ *  width is freq / Q; higher Q = less lag at the loop frequency (Q 5 at 50 Hz can destabilise
+ *  Kp ~1 A/mm if damping is low). Numbers with a decimal point. */
+#define POS_NOTCHES(X)      X(50.0, 10.0) X(150.0, 10.0)
 #if POS_NOTCH_ENABLE
-#define POS_NOTCH_TAG       "_notch" STRINGIFY(POS_NOTCH_FREQ_HZ) "Hz_Q" STRINGIFY(POS_NOTCH_Q)
+#define POS_NOTCHES_LABEL_(f, q)    "_notch" STRINGIFY(f) "Hz_Q" STRINGIFY(q)
+#define POS_NOTCH_TAG       POS_NOTCHES(POS_NOTCHES_LABEL_)
 #else
 #define POS_NOTCH_TAG       ""
+#endif
+/** Extended Kalman filter on the position the PI uses: the Method C model of vca_greybox_fit.ipynb
+ *  (ekf(), state [x, v], measurement x), run on the raw position at the cycle rate. Model input for the
+ *  step k-1 -> k is the current sent in cycle k-1; the PI uses the filtered estimate x(k|k), notched
+ *  if POS_NOTCH_ENABLE. The position trip always uses the raw position. See docs/position-control.md. */
+#define POS_KF_ENABLE       1     /**< 1 = PI uses the EKF position x(k|k), 0 = off */
+#define POS_KF_SIG_A_M_S2   7.86  /**< Process noise: white acceleration std in m/s^2 (Method C residual on its fit data) */
+#define POS_KF_SIG_Y_MM     0.0766 /**< Measurement noise std in mm (raw laser in the idle window) */
+/** Method C model, m a = (Gamma + Gamma1 x) i - c v - (C_R / (g0 - x)^3 - C_L / (g0 + x)^3), SI units
+ *  (fit printed by vca_greybox_fit.ipynb, Method C cell). */
+#define VCA_MASS_KG          51.5     /**< Moving mass m, kg */
+#define VCA_GAMMA_N_PER_A    200.9    /**< Motor constant at the centre Gamma, N/A */
+#define VCA_GAMMA1_N_PER_AM  3573.0   /**< Motor constant slope Gamma1, N/(A m) */
+#define VCA_DAMPING_NS_PER_M 1586.3   /**< Viscous friction c, N s/m */
+#define VCA_C_R_NM3          0.001604 /**< Right magnet strength C_R, N m^3 */
+#define VCA_C_L_NM3          0.001574 /**< Left magnet strength C_L, N m^3 */
+#define VCA_GAP_M            22.3e-3  /**< Magnet gap g0, m */
+#if POS_KF_ENABLE
+#define POS_KF_TAG          "_kf"
+#else
+#define POS_KF_TAG          ""
 #endif
 /** \brief Breakpoint table and file-name label, both generated from POS_REF_STEPS. The label is
  *  e.g. "0.0s0.0mm-8.0s1.0mm-": each breakpoint as <time>s<position>mm. */
@@ -214,9 +240,14 @@ _Static_assert((int)(PID_KP_A_PER_MM * 1e6) >= 0 && (int)(PID_KI_A_PER_MM_S * 1e
                "PID gains must be >= 0 (a negative gain is positive feedback)");
 _Static_assert(POS_TRIP_CYCLES >= 1, "POS_TRIP_CYCLES must be >= 1");
 _Static_assert(POS_NOTCH_ENABLE == 0 || POS_NOTCH_ENABLE == 1, "POS_NOTCH_ENABLE must be 0 or 1");
-_Static_assert((int)(POS_NOTCH_FREQ_HZ * 1000) > 0 && (int)(POS_NOTCH_FREQ_HZ * CYCLE_TIME_MS) < 500,
-               "POS_NOTCH_FREQ_HZ must be > 0 and below the Nyquist frequency (500 / CYCLE_TIME_MS Hz)");
-_Static_assert((int)(POS_NOTCH_Q * 1000) > 0, "POS_NOTCH_Q must be > 0");
+#define POS_NOTCH_VALID_(f, q)      && (int)((f) * 1000) > 0 && (int)((f) * CYCLE_TIME_MS) < 500 && (int)((q) * 1000) > 0
+_Static_assert(1 POS_NOTCHES(POS_NOTCH_VALID_),
+               "POS_NOTCHES: each frequency must be > 0 and below the Nyquist frequency (500 / CYCLE_TIME_MS Hz), each Q > 0");
+_Static_assert(POS_KF_ENABLE == 0 || POS_KF_ENABLE == 1, "POS_KF_ENABLE must be 0 or 1");
+_Static_assert((int)(POS_KF_SIG_A_M_S2 * 1e6) > 0 && (int)(POS_KF_SIG_Y_MM * 1e6) > 0 && (int)(VCA_MASS_KG * 1000) > 0,
+               "POS_KF_SIG_A_M_S2, POS_KF_SIG_Y_MM and VCA_MASS_KG must be > 0");
+_Static_assert((int)(POS_TRIP_MAX_MM * 1000) < (int)(VCA_GAP_M * 1e6) && (int)(-POS_TRIP_MIN_MM * 1000) < (int)(VCA_GAP_M * 1e6),
+               "POS_TRIP_MIN/MAX_MM must stay inside the magnet gap VCA_GAP_M (the EKF model has a pole there)");
 #if POS_REF_SHAPE == POS_REF_SHAPE_STEPS
 _Static_assert(1 POS_REF_STEPS(POS_REF_IN_WINDOW_),
                "POS_REF_STEPS position outside POS_REF_MIN_MM .. POS_REF_MAX_MM");
@@ -269,17 +300,17 @@ _Static_assert((int)((POS_REF_CHIRP_START_S + POS_REF_CHIRP_DURATION_S + 0.1) * 
 #define EXPERIMENT_TAG "noise_0A_" STRINGIFY(RUN_DURATION_S) "s"
 #elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_STEPS
 #define EXPERIMENT_TAG "posPI_steps_" POS_REF_STEPS_NAME "r" STRINGIFY(POS_REF_RAMP_S) "s_kp" \
-                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG
+                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG POS_KF_TAG
 #elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_CHIRP
 #define EXPERIMENT_TAG "posPI_chirp_" STRINGIFY(POS_REF_CHIRP_OFFSET_MM) "mm_" \
                        STRINGIFY(POS_REF_CHIRP_AMPLITUDE_MM) "mm_" STRINGIFY(POS_REF_CHIRP_F0_HZ) "to" \
                        STRINGIFY(POS_REF_CHIRP_F1_HZ) "Hz_" STRINGIFY(POS_REF_CHIRP_DURATION_S) "s_hold" \
                        STRINGIFY(POS_REF_CHIRP_START_S) "s_kp" STRINGIFY(PID_KP_A_PER_MM) "_ki" \
-                       STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG
+                       STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG POS_KF_TAG
 #elif EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_REF_SHAPE == POS_REF_SHAPE_SINE
 #define EXPERIMENT_TAG "posPI_sine_" STRINGIFY(POS_REF_SINE_OFFSET_MM) "mm_" \
                        STRINGIFY(POS_REF_SINE_AMPLITUDE_MM) "mm_" STRINGIFY(POS_REF_SINE_FREQ_HZ) "Hz_kp" \
-                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG
+                       STRINGIFY(PID_KP_A_PER_MM) "_ki" STRINGIFY(PID_KI_A_PER_MM_S) POS_NOTCH_TAG POS_KF_TAG
 #elif EXPERIMENT_MODE == EXPERIMENT_PRBS
 #define EXPERIMENT_TAG "prbs_" STRINGIFY(PRBS_AMPLITUDE_A) "A_" STRINGIFY(PRBS_BANDWIDTH_HZ) "Hz_" \
                        STRINGIFY(PRBS_DURATION_S) "s"
@@ -444,7 +475,10 @@ typedef struct
    double pid_p_A;           /**< PI proportional term in Amps (nan outside a position-control run) */
    double pid_i_A;           /**< PI integrator in Amps (nan outside a position-control run) */
    double pid_output_A;      /**< Saturated PI output in Amps, commanded in the NEXT cycle (nan outside a position-control run) */
-   double position_filt_mm;  /**< Position the PI used: notched if POS_NOTCH_ENABLE, else raw (nan outside a position-control run) */
+   double position_filt_mm;  /**< Position the PI used: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE) (nan outside a position-control run) */
+   double kf_velocity_mm_s;  /**< EKF velocity estimate v(k|k) in mm/s (nan unless POS_KF_ENABLE) */
+   double kf_innovation_mm;  /**< EKF innovation y(k) - x(k|k-1) in mm (nan unless POS_KF_ENABLE) */
+   double kf_innov_std_mm;   /**< EKF predicted innovation std sqrt(S) in mm (nan unless POS_KF_ENABLE) */
 } sample_log_entry_t;
 
 /** \brief Position controller values for one cycle, passed to log_sample() */
@@ -454,7 +488,10 @@ typedef struct
    double p_A;               /**< Kp * e_k in Amps */
    double i_A;               /**< Integrator after this cycle's update, in Amps */
    double output_A;          /**< Saturated P + I in Amps, sent to the drive in the next cycle */
-   double position_filt_mm;  /**< Position fed to the PI: notched if POS_NOTCH_ENABLE, else raw */
+   double position_filt_mm;  /**< Position fed to the PI: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE) */
+   double kf_velocity_mm_s;  /**< EKF velocity estimate v(k|k) in mm/s (nan unless POS_KF_ENABLE) */
+   double kf_innovation_mm;  /**< EKF innovation y(k) - x(k|k-1) in mm (nan unless POS_KF_ENABLE) */
+   double kf_innov_std_mm;   /**< EKF predicted innovation std sqrt(S) in mm (nan unless POS_KF_ENABLE) */
 } pid_log_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
