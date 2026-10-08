@@ -20,7 +20,7 @@
 #define EXPERIMENT_POSITION_PID  7   /**< Closed-loop position control: PI on the AI1 laser position tracks POS_REF_* */
 #define EXPERIMENT_MODE          EXPERIMENT_POSITION_PID /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case in open_loop_current.h. */
 
-#define RUN_DURATION_S      65.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
+#define RUN_DURATION_S      150.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
 /** 0 A rest period before the experiment starts, used to measure the accelerometer (AI2) bias.
  *  Timestamps are shifted so this window has negative time (-BIAS_IDLE_S .. 0) and the excitation
  *  still starts at t = 0. Total loop time is BIAS_IDLE_S + RUN_DURATION_S. export_csv() subtracts

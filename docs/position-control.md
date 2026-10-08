@@ -3,7 +3,7 @@
 In the `EXPERIMENT_POSITION_PID` mode the PC closes a position loop around the voice coil. You set a position reference in mm. Every 0.5 ms the PC:
 1. reads the laser position;
 2. compares it with the reference;
-3. computes a coil current with a PI controller;
+3. computes a coil current with a PI or a sliding-mode controller (`POS_CONTROLLER`);
 4. sends that current to the drive.
 
 The drive only regulates current, as in every other experiment. Position control happens entirely on the PC.
@@ -50,7 +50,14 @@ The reference is fixed when you compile. It is an **absolute** position in the `
   - **Before:** hold the offset until `POS_REF_CHIRP_START_S`, so the pull-in from rest settles first.
   - **During:** offset + amplitude · sin(φ), with an exponential sweep f(t) = f0 · (f1/f0)^(t/T). Every octave takes the same time; for 1 → 10 Hz in 60 s that is about 18 s per octave. It's the same law as the current-mode chirp experiments.
   - **End:** the sweep runs on to the next zero crossing after T (at most half a period, e.g. +48 ms for 1 → 10 Hz), then holds the offset. The reference therefore has no step at either end.
-  - **Analysis:** for chirp runs, `scripts/plot_voice_coil_log_ref_track.py` also prints and plots amplitude (position / reference) and phase lag at 1, 1.5, 2, 3 … 10 Hz.
+  - **Fade in/out:** without a fade, the reference *velocity* still steps at both ends: from 0 to amplitude · 2π f0, and from amplitude · 2π f1 back to 0 (157 mm/s for 2.5 mm at 10 Hz). The SMC feeds the reference velocity forward, so it turns that step into a current kick. `POS_REF_CHIRP_TAPER_S` multiplies the amplitude by a raised cosine that rises over the first and falls over the last `POS_REF_CHIRP_TAPER_S` of the sweep. Position, velocity and acceleration then all start and end at zero. 0 turns it off.
+  - **Analysis:** with `--chirp`, `scripts/plot_voice_coil_log_ref_track.py` also prints and plots amplitude (position / reference) and phase lag at 1, 1.5, 2, 3 … 10 Hz.
+- **Chirp and hold** (`POS_REF_SHAPE_CHIRP_HOLD`): the same sweep with all the `POS_REF_CHIRP_*` settings, then the sine stays at f1.
+  - **Segments:** fade in and sweep f0 → f1 over T, as above. Then f1 at full amplitude for `POS_REF_CHIRP_F1_HOLD_S`. Then a fade-out over `POS_REF_CHIRP_TAPER_S`, still at f1, to the next zero crossing. Then the offset until `RUN_DURATION_S`.
+  - **Smooth:** the phase continues from the sweep, φ = φ_sweep(T) + 2π f1 (τ − T), so position, velocity and acceleration have no step at T.
+  - **Duration:** `RUN_DURATION_S` must cover start + T + `POS_REF_CHIRP_F1_HOLD_S` + `POS_REF_CHIRP_TAPER_S` (+0.1 s); the build fails otherwise.
+  - **File name:** `chirphold_…_taper<F>s_f1hold<H>s`. `_hold` is still `POS_REF_CHIRP_START_S`. `scripts/ekf_delay_scan.py` adds a window in the middle of the hold.
+  - **At 50 Hz:** the reference acceleration is A·(2π·50)² ≈ 79 m/s² at 0.8 mm, about 20 A of feedforward (m/Γ = 0.26 A per m/s²), close to `OUTPUT_LIMIT_A`. 50 Hz is also the mains pickup on the laser: the SMC bypasses the notches, but the EKF innovation then mixes real motion with pickup; 49 or 51 Hz keeps them apart.
 
   **What to expect with PI only** (simulation of the real controller, Kp 1.0 / Ki 0.12, 3 mm, 1 → 10 Hz):
   - At low frequency the shaft falls short and lags because of friction (about 84 % and 12° at 1 Hz, as in the 1 Hz sine run).
@@ -72,6 +79,23 @@ u  = clamp(P + I, −10 A, +10 A)
 - **Anti-windup.** When P + I would exceed ±10 A, the output is clamped. Without protection the integrator would keep growing during the clamp and then overshoot badly once the error reverses. The controller therefore skips any integrator step that would push further into saturation, and also limits I itself to ±10 A. With the default profile the output stays below 0.5 A, so this only matters if something goes wrong.
 - **No D term (yet).** The laser signal has noise and 50 Hz mains pickup on it. Differentiating it would turn that into current noise. A later D term should act on the measured position, not on the error, so that reference steps don't cause a kick. It also needs a low-pass filter.
 
+### Sliding-mode controller (`POS_CONTROLLER_SMC`)
+This is a port of the sliding-mode controller in `vca_greybox_fit.ipynb` ("Sliding-mode control on the Method C plant"); the notebook has the derivation. It needs the EKF (`POS_KF_ENABLE 1`) for the velocity, and it bypasses the notches. Every cycle, from t = 0 on, in SI units:
+
+```
+x, v     = EKF prediction x(k+1+D|k), v(k+1+D|k)    (the output is sent next cycle and acts D cycles later)
+r, r', r'' = reference and its analytic derivatives at t + (1 + D)·0.5 ms,   D = POS_KF_DELAY_CYCLES
+z1 = x − r,  z2 = v − r',  s = a·z1 + z2
+u  = clamp( (r'' − a·z2 − f(x, v) − η·sat(s/φ)) / g(x), −10 A, +10 A )
+f(x, v) = (−c·v − C_R/(g0 − x)³ + C_L/(g0 + x)³) / m,   g(x) = (Γ + Γ1·x) / m
+```
+
+- **Gains.** a = `SMC_A_FREQ_FACTOR` · 2π · the highest reference frequency (`SMC_STEPS_FREQ_HZ` for steps). φ = a · `SMC_LAYER_MM`, so |x − r| ≤ `SMC_LAYER_MM` inside the layer. η = `SMC_ETA_SIGMAS` · `POS_KF_SIG_A_M_S2`: the model error in acceleration that the switching term has to dominate.
+- **Stiffness.** Inside the layer the law is a PD around the model feedforward, with Kp ≈ (m/Γ)·η/`SMC_LAYER_MM`. That is about 200 A/mm at 0.02 mm, against 1 A/mm for the PI. The startup print gives Kp, Kd and the layer pole η/φ.
+- **Sampling limit.** Inside the layer, s(k+1) = (1 − η/φ·Ts)·s(k). Startup refuses η/φ·Ts ≥ 2, where the layer is unstable and the current chatters between ±η·m/Γ ≈ ±4 A. It warns at ≥ 1, where s overshoots. A slow reference (small a) therefore needs a wider layer.
+- **Delay.** Without the one-step prediction, the 0.5 ms output delay costs about 0.13 mm of lag at 20 Hz and 2 mm. With the prediction, the clean-plant error is the same as the notebook's (0.003 mm). On the hardware the current acts about 4 cycles later still (see the EKF **Input** below), so the prediction runs 1 + `POS_KF_DELAY_CYCLES` steps ahead with the currents already sent, and the reference is taken at that same time.
+- **Log.** `pid_p_A` is the equivalent (model) control and `pid_i_A` the switching term; their sum, clamped, is `pid_output_A`.
+
 ### Position filter (mains notches) — currently ON at 50 + 150 Hz, after the EKF
 **Status:** two notches in cascade behind the EKF, 50 Hz and 150 Hz, both Q = 10 (`POS_NOTCH_ENABLE 1`, `POS_NOTCHES(X) X(50.0, 10.0) X(150.0, 10.0)`), see the EKF section below. Add or remove `X(freq_Hz, Q)` entries to change the set; the file name gets one `_notch<f>Hz_Q<q>` per entry. Their lags add: together 1.1° at 7 Hz, 1.6° at 10 Hz, 1.9° at 12 Hz, 3.5° at 20 Hz. Earlier the single 50 Hz notch on the raw position was switched off, so the PI used the raw position. The notch hides *real* 50 Hz motion from the PI as well as the pickup. That matters for sine references between about 40 and 60 Hz, where it removes or distorts the feedback. The code is kept; set `POS_NOTCH_ENABLE 1` to use it again for references well below 40 Hz. Measured at Kp = 1.0, 5 mm / 1 Hz sine: on vs off gave the same tracking (0.86 vs 0.87 mm rms error), with 50 Hz in the current at 1 vs 83 mA and current noise at 45 vs 80 mA rms.
 
@@ -91,21 +115,30 @@ A notch removes one frequency and leaves the rest almost untouched. A low-pass w
 - **Why Q = 10 and not lower.** A wider notch (lower Q) adds more lag. At high Kp the loop has little phase margin near its 10–12 Hz mode, so every degree counts. In simulation at Kp = 1.0 with the lowest damping estimate, Q = 5 made the loop unstable, while Q = 10 and no notch both stayed stable. If you push Kp higher, watch for ringing at 10–15 Hz. `POS_NOTCH_ENABLE` 0 switches the notch off for a direct comparison.
 - **The trip ignores the filter.** The ±10 mm position trip always checks the **raw** position, so a filter can never delay it.
 
+### Output notch (controller current) — tried, removed
+A 157 Hz, Q 5 notch on the controller output (to remove the 150 Hz mains harmonic and a ~160 Hz loop resonance from the current) was tried on 2026-10-08 in a 51 Hz chirp_and_hold run (file name `_onotch157.0Hz_Q5.0`). It was counterproductive and has been removed from the code.
+
 ### Position filter (EKF on the Method C model) — currently OFF
 **Status:** off (`POS_KF_ENABLE 0`). Set it to 1 to have the PI use the Kalman estimate instead of the raw position. The file name gets `_kf` when it is on.
 
-- **Combined with the notch.** With both on, the order is EKF → notch: the EKF gets the raw position and the notch filters x(k|k) before the PI. Not the other way round: a notch in front would change the measurement the EKF's model assumes (gain and phase around the notch frequency), make the innovations coloured, and break the innovation check below. Under test: notches at 50 and 150 Hz to remove the mains pickup and its harmonic that the EKF passes on (lag at 7–12 Hz about 1.1–1.9° for both together at Q = 10). File name: `..._notch50.0Hz_Q10.0_notch150.0Hz_Q10.0_kf`. If this works only partly, the next step is a 150 Hz (and 50 Hz) disturbance oscillator in the EKF's measurement model instead of the notch.
+- **Combined with the notch.** With both on, the order is EKF → notch: the EKF gets the raw position and the notch filters x(k|k) before the PI. Not the other way round: a notch in front would change the measurement the EKF's model assumes (gain and phase around the notch frequency), make the innovations coloured, and break the innovation check below. Under test: notches at 50 and 150 Hz to remove the mains pickup and its harmonic that the EKF passes on (lag at 7–12 Hz about 1.1–1.9° for both together at Q = 10). File name: `..._notch50.0Hz_Q10.0_notch150.0Hz_Q10.0_kf`. The SMC bypasses the notches; for it (and near 50 Hz, where a notch would remove the reference) the 50 Hz pickup is now a state of the EKF instead, see **Mains pickup** below.
 
 - **What it is.** A C port of `ekf()` in `vca_greybox_fit.ipynb`. It is an extended Kalman filter with state [x, v] and measurement y = x, running every cycle (0.5 ms) on the **raw** laser position. Like the notch, it starts in the first idle-window cycle, seeded with the first sample at rest.
 - **Model.** Method C, with the fitted parameters hard-coded as `VCA_*` in `vca_model.h` (m = 51.5 kg, Γ = 200.9 N/A, Γ₁ = 3573 N/(A·m), c = 1586.3 N·s/m, C_R = 0.001604 N·m³, C_L = 0.001574 N·m³, g₀ = 22.3 mm):
   m ẍ = (Γ + Γ₁x) i − c ẋ − (C_R/(g₀−x)³ − C_L/(g₀+x)³).
   - Predict step: one RK4 step, with the input held over the step.
   - Covariance: F = I + A·Ts + (A·Ts)²/2, linearised at the predicted state.
-- **Input.** The model input for the step k−1 → k is the current the master **sent in cycle k−1**.
+- **Input.** The model input for the step k−1 → k is the current the master **sent in cycle k−1−D**, D = `POS_KF_DELAY_CYCLES` (4). The model was fitted on the drive's `target_current_A` readback, which trails the sent current (`pid_output_A` one row earlier) by about 4 cycles (2 ms). With D = 0 the filter assumes the current acts at once. `scripts/ekf_delay_scan.py` replays the EKF on a log for D = 0…8; on the 1→40 Hz SMC chirp D = 4 gives the smallest innovation (RMS 0.094 vs 0.137 mm, innovation std / predicted 1.10 vs 1.61) and keeps the filter consistent up to about 25 Hz instead of 15 Hz. The delay does not remove the mean innovation that grows above about 20 Hz (+0.006 mm at 25 Hz for every D): that is model error, not delay. The file name gets `_kfd<D>` instead of `_kf` when D > 0.
 - **Output.** The PI gets the filtered x(k|k). It is logged as `position_filt_mm`.
-- **Noise.** Both values are from the notebook.
-  - Process noise: white acceleration, `POS_KF_SIG_A_M_S2` = 7.86 m/s² (the Method C residual on its fit data).
-  - Measurement noise: `POS_KF_SIG_Y_MM` = 0.0766 mm (the raw laser in the idle window). Most of it is 50/150 Hz pickup, which is not white.
+- **Noise.**
+  - Process noise: white acceleration, `POS_KF_SIG_A_M_S2` = 7.86 m/s² (the Method C residual on its fit data, from the notebook).
+  - Measurement noise: `POS_KF_SIG_Y_MM` = **0.045 mm** (was 0.0766 mm). It must describe the part of the laser signal that no state of the filter explains, because it sets how much the filter trusts each sample. The whole idle-window laser (0 A) has std 0.078–0.083 mm, and about 70 % of that variance is the 50 Hz mains line (0.090–0.097 mm amplitude). With the pickup state on (below), that line is explained by the filter, so it must not be counted again as noise. Without it the idle laser has std 0.040–0.046 mm, median 0.0448 over the last 12 position logs. That still holds the 150 Hz line (about 0.05 mm amplitude, not modelled, so deliberately kept in the noise) and about 0.024 mm white noise. The old 0.0766 would make the filter trust the laser about 3× too little and lean on the model, which is 20–40 % off around 50 Hz. With `POS_KF_MAINS_ENABLE 0`, `vca_ekf_init()` counts the pickup as noise again: √(`POS_KF_SIG_Y_MM`² + `POS_KF_MAINS_PICKUP_MM`²/2) = 0.080 mm. The startup print shows the value in use.
+- **Mains pickup** (`POS_KF_MAINS_ENABLE 1`, file name `_kfd4m`). The laser reads 0.09–0.1 mm of 50 Hz even at 0 A. Without a model of it the EKF passes it into x̂ and v̂, and the SMC drives about 2 A at 50 Hz, which really moves the shaft (about 0.1 mm, seen on the accelerometer). In a 51 Hz chirp_and_hold that 50 Hz motion beats with the 51 Hz motion: the amplitude swings between 0.65 and 1.05 mm once per second.
+  - Model: state [x, v, c, s], y = x + c + e. Each step [c, s] is rotated by 2π·`POS_KF_MAINS_HZ`·Ts plus a random walk of std 2π·`POS_KF_MAINS_BW_HZ`·Ts·σ_y; the current does not drive c, s. c, s start at 0 with std `POS_KF_MAINS_PICKUP_MM` and converge in the idle window. Motion the current causes is in the model prediction, so only the unexplained part of the laser is split between x̂ and the pickup: in effect a notch about `POS_KF_MAINS_BW_HZ` wide, on the innovation only. The SMC prediction propagates x, v only.
+  - Bandwidth: 0.5 Hz. The mains drifted between 49.976 and 49.997 Hz in one run; at 0.1 Hz the state could not follow a 0.05 Hz offset. It must stay well below |reference frequency − 50 Hz|, or the filter takes real motion for pickup; startup warns within 2 × the bandwidth.
+  - Closed-loop simulation (`scripts/ekf_mains_replay.py --sim`: Method C plant, 4-cycle delay, the SMC, laser = x + measured pickup and noise, 0.6 mm at 51 Hz). It reproduces the logged 2.2 A at 50 Hz without the pickup state. With it, mains 49.98–50.02 Hz: 50 Hz current 2.0–2.1 → 0.01–0.3 A, real 50 Hz motion 0.08 → 0.001–0.012 mm, true error rms 0.133 → 0.104 mm. The steady amplitude error at 51 Hz is unchanged.
+  - Innovation check: the innovation std / predicted std ratio rises (replay of the 51 Hz hold: 1.6 → 2.1), because the predicted std is now smaller while the model error at 51 Hz is unchanged. That is expected. The check that matters is the 50 Hz line in the innovation PSD, which should be gone. `kf_pickup_mm` logs the pickup estimate; `--kf` in the tracking plot shows it and prints its 50 Hz amplitude.
+  - Checked: the C filter matches the Python port in `ekf_mains_replay.py` to 1e-15 mm on a logged run; with the pickup state off it matches the old 2-state filter.
 - **Checked offline.** On the raw `data/test` logs the C code matches the notebook's `ekf()` to within 1e-12 m.
 - **Caveat.** The model is good on the scheduled chirp: one-step innovation 0.115 mm rms, innovation std / predicted std = 1.35. It is poor on the plain 1→55 Hz chirp: 1.37 mm rms, ratio 16. The position references run at 1–10 Hz, which is in that poorer range. Check the innovation ratio (`kf_innovation_mm` / `kf_innov_std_mm`) of the first run before trusting the estimate.
 - **The trip ignores the filter**, as with the notch.
@@ -260,10 +293,11 @@ The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0
 | `kf_velocity_mm_s` | EKF velocity estimate v(k|k) (`nan` unless `POS_KF_ENABLE`) |
 | `kf_innovation_mm` | EKF innovation y(k) − x(k|k−1) (`nan` unless `POS_KF_ENABLE`) |
 | `kf_innov_std_mm` | EKF predicted innovation std √S; the innovation should stay mostly within ±2 of these (`nan` unless `POS_KF_ENABLE`) |
+| `kf_pickup_mm` | EKF estimate of the mains pickup on the laser, ĉ(k|k) (`nan` unless `POS_KF_MAINS_ENABLE`) |
 
 `position_filt_mm` in the same row is the y_f(k) the controller used, and `position_mm` is the raw measurement. Tracking error as the PI saw it = `position_ref_mm − position_filt_mm`.
 
-`scripts/plot_voice_coil_log_ref_track.py` plots tracking: the raw position, the position the PI used and the reference; the PI output with its P and I terms; and the tracking error as the PI saw it. Run it with `--preview` to plot the reference programmed in `closed_loop_settings.h` before a run. For an EKF run it adds a second figure to check the filter. It shows the innovation over time with ±2 predicted std, its histogram against the predicted normal density, and its PSD against the white level. It also prints the RMS, the share inside ±2 std and the innovation std / predicted std ratio. `scripts/plot_voice_coil_log.py` also draws the reference over the measured position.
+`scripts/plot_voice_coil_log_ref_track.py` plots tracking: the raw and filtered position over the reference, the controller output with its two logged terms, and the tracking error. It reads the controller, reference, gains and filters from the log's file name, puts them in the title, and labels the traces for that controller (PI: P and I term; SMC: equivalent control and switching term). Run it with `--preview` to plot the reference programmed in `closed_loop_settings.h` before a run. Extra figures are off by default. `--chirp` adds the tracking per frequency for chirp runs, and `--kf` adds a second figure to check the filter for an EKF run. It shows the innovation over time with ±2 predicted std, its histogram against the predicted normal density, and its PSD against the white level. It also prints the RMS, the share inside ±2 std and the innovation std / predicted std ratio. `scripts/plot_voice_coil_log.py` also draws the reference over the measured position.
 
 ## 9. Where to change things
 
@@ -271,22 +305,25 @@ All settings are `#define`s. Rebuild after changing them. The experiment selecti
 `run_settings.h`; everything specific to position control is in `closed_loop_settings.h`, ordered from
 "changed every run" (reference) via controller and filters to safety limits; the fitted model is in
 `vca_model.h` and the laser calibration in `main.h`. The code is in `closed_loop_position.c` (reference,
-trip, filter chain), `controller_pi.c` (the PI), `vca_ekf.c` and `notch.c`.
+trip, filter chain), `controller_pi.c` (the PI), `controller_smc.c` (the SMC), `vca_ekf.c` and `notch.c`.
 
 | What | Setting |
 |---|---|
 | Select this experiment | `EXPERIMENT_MODE` = `EXPERIMENT_POSITION_PID` (`run_settings.h`) |
 | Run length (after the 3 s idle window) | `RUN_DURATION_S` (`run_settings.h`) (36 s; other experiments need it longer, their checks will tell you) |
-| Reference shape | `POS_REF_SHAPE` = `POS_REF_SHAPE_STEPS`, `POS_REF_SHAPE_SINE` or `POS_REF_SHAPE_CHIRP` |
+| Reference shape | `POS_REF_SHAPE` = `POS_REF_SHAPE_STEPS`, `POS_REF_SHAPE_SINE`, `POS_REF_SHAPE_CHIRP` or `POS_REF_SHAPE_CHIRP_HOLD` |
 | Step breakpoints | `POS_REF_STEPS(X)`: `X(time_s, position_mm)` entries, numbers with a decimal point |
 | Ramp time between steps | `POS_REF_RAMP_S` |
 | Sine reference | `POS_REF_SINE_OFFSET_MM`, `POS_REF_SINE_AMPLITUDE_MM`, `POS_REF_SINE_FREQ_HZ` |
-| Chirp reference | `POS_REF_CHIRP_OFFSET_MM`, `POS_REF_CHIRP_AMPLITUDE_MM`, `POS_REF_CHIRP_F0_HZ`, `POS_REF_CHIRP_F1_HZ`, `POS_REF_CHIRP_DURATION_S`, `POS_REF_CHIRP_START_S` (`RUN_DURATION_S` must cover start + duration) |
-| Controller | `POS_CONTROLLER` (only `POS_CONTROLLER_PI` for now) |
-| Gains | `PID_KP_A_PER_MM`, `PID_KI_A_PER_MM_S` |
-| Output current limit | `PID_OUTPUT_LIMIT_A` |
+| Chirp reference | `POS_REF_CHIRP_OFFSET_MM`, `POS_REF_CHIRP_AMPLITUDE_MM`, `POS_REF_CHIRP_F0_HZ`, `POS_REF_CHIRP_F1_HZ`, `POS_REF_CHIRP_DURATION_S`, `POS_REF_CHIRP_START_S` (`RUN_DURATION_S` must cover start + duration), `POS_REF_CHIRP_TAPER_S` (amplitude fade-in/out, 0 = off) |
+| Chirp and hold | the chirp settings plus `POS_REF_CHIRP_F1_HOLD_S` (time at f1 at full amplitude before the fade-out) |
+| Controller | `POS_CONTROLLER` = `POS_CONTROLLER_PI` or `POS_CONTROLLER_SMC` (needs `POS_KF_ENABLE 1`) |
+| PI gains | `PID_KP_A_PER_MM`, `PID_KI_A_PER_MM_S` |
+| SMC gains | `SMC_A_FREQ_FACTOR`, `SMC_STEPS_FREQ_HZ`, `SMC_LAYER_MM`, `SMC_ETA_SIGMAS` |
+| Output current limit | `OUTPUT_LIMIT_A` |
 | Allowed reference range | `POS_REF_MIN_MM`, `POS_REF_MAX_MM` |
 | Trip window and confirmation | `POS_TRIP_MIN_MM`, `POS_TRIP_MAX_MM`, `POS_TRIP_CYCLES` |
 | Position notches on/off, frequencies, widths | `POS_NOTCH_ENABLE`, `POS_NOTCHES(X)`: `X(freq_Hz, Q)` entries, numbers with a decimal point |
-| Position EKF on/off, noise, model | `POS_KF_ENABLE`, `POS_KF_SIG_A_M_S2`, `POS_KF_SIG_Y_MM`; model `VCA_*` in `vca_model.h` |
+| Position EKF on/off, noise, model | `POS_KF_ENABLE`, `POS_KF_SIG_A_M_S2`, `POS_KF_SIG_Y_MM`, `POS_KF_DELAY_CYCLES`; model `VCA_*` in `vca_model.h` |
+| EKF mains pickup state | `POS_KF_MAINS_ENABLE`, `POS_KF_MAINS_HZ`, `POS_KF_MAINS_BW_HZ`, `POS_KF_MAINS_PICKUP_MM` |
 | Laser calibration | `AI1_MM_SCALE`, `AI1_MM_OFFSET`, `AI1_CENTRE_MM`, `AI1_POSITION_SIGN` (`main.h`) |

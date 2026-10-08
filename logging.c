@@ -75,6 +75,7 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
       fieldbus->samples[fieldbus->sample_count].kf_velocity_mm_s = pid ? pid->kf_velocity_mm_s : NAN;
       fieldbus->samples[fieldbus->sample_count].kf_innovation_mm = pid ? pid->kf_innovation_mm : NAN;
       fieldbus->samples[fieldbus->sample_count].kf_innov_std_mm = pid ? pid->kf_innov_std_mm : NAN;
+      fieldbus->samples[fieldbus->sample_count].kf_pickup_mm = pid ? pid->kf_pickup_mm : NAN;
       fieldbus->sample_count++;
    }
 }
@@ -146,7 +147,7 @@ compute_ai2_bias_V(const Fieldbus *fieldbus)
  *  File names carry the compile-time experiment tag (EXPERIMENT_TAG: mode + parameters) followed
  *  by a wall-clock timestamp, so a directory listing shows what each run was. Creates two files:
  *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ..., position_mm, ai2_corrected_V, position_ref_mm, pid_p_A, pid_i_A, pid_output_A, position_filt_mm,
- *      kf_velocity_mm_s, kf_innovation_mm, kf_innov_std_mm)
+ *      kf_velocity_mm_s, kf_innovation_mm, kf_innov_std_mm, kf_pickup_mm)
  *      scripts/benchmark-rt.sh reads cycle_jitter_us and pdo_exchange_us by column number (10 and 11),
  *      so new columns must be appended, not inserted.
  *      Rows with time_s < 0 are the 0 A bias idle window (BIAS_IDLE_S). ai2_corrected_V is
@@ -180,10 +181,10 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm,ai2_corrected_V,position_ref_mm,pid_p_A,pid_i_A,pid_output_A,position_filt_mm,kf_velocity_mm_s,kf_innovation_mm,kf_innov_std_mm\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm,ai2_corrected_V,position_ref_mm,pid_p_A,pid_i_A,pid_output_A,position_filt_mm,kf_velocity_mm_s,kf_innovation_mm,kf_innov_std_mm,kf_pickup_mm\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f,%.4f,%.6f,%.4f,%.6f,%.6f,%.6f,%.4f,%.4f,%.6f,%.6f\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f,%.4f,%.6f,%.4f,%.6f,%.6f,%.6f,%.4f,%.4f,%.6f,%.6f,%.6f\n",
                  fieldbus->samples[i].timestamp_s,
                  fieldbus->samples[i].actual_current_A,
                  fieldbus->samples[i].target_current_A,
@@ -204,7 +205,8 @@ export_csv(Fieldbus *fieldbus)
                  fieldbus->samples[i].position_filt_mm,
                  fieldbus->samples[i].kf_velocity_mm_s,
                  fieldbus->samples[i].kf_innovation_mm,
-                 fieldbus->samples[i].kf_innov_std_mm);
+                 fieldbus->samples[i].kf_innov_std_mm,
+                 fieldbus->samples[i].kf_pickup_mm);
       }
       fclose(fp);
       printf("Wrote %d samples to %s\n", fieldbus->sample_count, sample_file);

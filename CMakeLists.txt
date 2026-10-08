@@ -48,6 +48,7 @@ add_executable(ethercat-voice-coil-controller
    open_loop_current.c
    closed_loop_position.c
    controller_pi.c
+   controller_smc.c
    notch.c
    vca_ekf.c
    diagnostics.c

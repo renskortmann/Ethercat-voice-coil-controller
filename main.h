@@ -188,26 +188,28 @@ typedef struct
    double pdo_exchange_us;   /**< Time spent in ecx_send_processdata + ecx_receive_processdata (frame round-trip) */
    double position_mm;       /**< Shaft displacement from centre in mm, derived from ai1_value_V (AI1_* calibration) */
    double position_ref_mm;   /**< Position reference in mm (nan outside a position-control run or during the idle window) */
-   double pid_p_A;           /**< PI proportional term in Amps (nan outside a position-control run) */
-   double pid_i_A;           /**< PI integrator in Amps (nan outside a position-control run) */
-   double pid_output_A;      /**< Saturated PI output in Amps, commanded in the NEXT cycle (nan outside a position-control run) */
-   double position_filt_mm;  /**< Position the PI used: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE) (nan outside a position-control run) */
+   double pid_p_A;           /**< PI: proportional term; SMC: equivalent (model) control; in Amps (nan outside a position-control run) */
+   double pid_i_A;           /**< PI: integrator; SMC: switching term -eta sat(s / phi) / g; in Amps (nan outside a position-control run) */
+   double pid_output_A;      /**< Saturated controller output in Amps, commanded in the NEXT cycle (nan outside a position-control run) */
+   double position_filt_mm;  /**< Position after the filters: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE, not with the SMC) (nan outside a position-control run) */
    double kf_velocity_mm_s;  /**< EKF velocity estimate v(k|k) in mm/s (nan unless POS_KF_ENABLE) */
    double kf_innovation_mm;  /**< EKF innovation y(k) - x(k|k-1) in mm (nan unless POS_KF_ENABLE) */
    double kf_innov_std_mm;   /**< EKF predicted innovation std sqrt(S) in mm (nan unless POS_KF_ENABLE) */
+   double kf_pickup_mm;      /**< EKF mains pickup estimate on the laser in mm (nan unless POS_KF_MAINS_ENABLE) */
 } sample_log_entry_t;
 
 /** \brief Position controller values for one cycle, passed to log_sample() */
 typedef struct
 {
    double position_ref_mm;   /**< Reference r_k in mm (nan during the idle window) */
-   double p_A;               /**< Kp * e_k in Amps */
-   double i_A;               /**< Integrator after this cycle's update, in Amps */
-   double output_A;          /**< Saturated P + I in Amps, sent to the drive in the next cycle */
-   double position_filt_mm;  /**< Position fed to the PI: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE) */
+   double p_A;               /**< PI: Kp * e_k; SMC: equivalent (model) control; in Amps */
+   double i_A;               /**< PI: integrator after this cycle's update; SMC: switching term; in Amps */
+   double output_A;          /**< Saturated controller output in Amps, sent to the drive in the next cycle */
+   double position_filt_mm;  /**< Position after the filters: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE, not with the SMC) */
    double kf_velocity_mm_s;  /**< EKF velocity estimate v(k|k) in mm/s (nan unless POS_KF_ENABLE) */
    double kf_innovation_mm;  /**< EKF innovation y(k) - x(k|k-1) in mm (nan unless POS_KF_ENABLE) */
    double kf_innov_std_mm;   /**< EKF predicted innovation std sqrt(S) in mm (nan unless POS_KF_ENABLE) */
+   double kf_pickup_mm;      /**< EKF mains pickup estimate on the laser in mm (nan unless POS_KF_MAINS_ENABLE) */
 } pid_log_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */

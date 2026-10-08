@@ -3,7 +3,7 @@
  *
  * m a = (Gamma + Gamma1 x) i - c v - (C_R / (g0 - x)^3 - C_L / (g0 + x)^3), SI units.
  * Not a per-run setting: replace the values only after a new fit (printed by the notebook's
- * Method C cell). Used by the position EKF (vca_ekf.c).
+ * Method C cell). Used by the position EKF (vca_ekf.c) and the sliding-mode controller (controller_smc.c).
  */
 
 #ifndef VCA_MODEL_H
@@ -16,5 +16,22 @@
 #define VCA_C_R_NM3          0.001604 /**< Right magnet strength C_R, N m^3 */
 #define VCA_C_L_NM3          0.001574 /**< Left magnet strength C_L, N m^3 */
 #define VCA_GAP_M            22.3e-3  /**< Magnet gap g0, m */
+
+/** \brief Method C acceleration in m/s^2: ((Gamma + Gamma1 x) i - c v - (C_R / (g0 - x)^3 - C_L / (g0 + x)^3)) / m
+ *  \param x Position in m, \param v Velocity in m/s, \param u Current in A */
+static inline double
+vca_acc(double x, double v, double u)
+{
+   double gr = VCA_GAP_M - x, gl = VCA_GAP_M + x;
+   double spring = VCA_C_R_NM3 / (gr * gr * gr) - VCA_C_L_NM3 / (gl * gl * gl);
+   return ((VCA_GAMMA_N_PER_A + VCA_GAMMA1_N_PER_AM * x) * u - VCA_DAMPING_NS_PER_M * v - spring) / VCA_MASS_KG;
+}
+
+/** \brief Input gain g(x) = (Gamma + Gamma1 x) / m in m/s^2 per A, so that a = vca_acc(x, v, 0) + g(x) u */
+static inline double
+vca_gain(double x)
+{
+   return (VCA_GAMMA_N_PER_A + VCA_GAMMA1_N_PER_AM * x) / VCA_MASS_KG;
+}
 
 #endif /* VCA_MODEL_H */

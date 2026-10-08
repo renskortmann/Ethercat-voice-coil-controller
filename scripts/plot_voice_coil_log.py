@@ -54,7 +54,7 @@ AXES = [
             "demand current": ("demand_current_A", "tab:green"),
             # Position-control runs only (nan, so not drawn, in other logs). Computed from this
             # row's position and sent to the drive one cycle later.
-            "PI output": ("pid_output_A", "tab:purple"),
+            "controller output": ("pid_output_A", "tab:purple"),  # PI or SMC
         },
     ),
     (

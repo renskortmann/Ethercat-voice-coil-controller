@@ -17,7 +17,7 @@ boolean
 controller_setup(double kp_amps)
 {
    printf("\nExperiment: position PI, Kp = %.4f A/mm, Ki = %.4f A/(mm s), output limit +/-%.2f A (drive KP %.1f A)\n",
-          PID_KP_A_PER_MM, PID_KI_A_PER_MM_S, PID_OUTPUT_LIMIT_A, kp_amps);
+          PID_KP_A_PER_MM, PID_KI_A_PER_MM_S, OUTPUT_LIMIT_A, kp_amps);
    pi_integrator_A = 0.0;
    return TRUE;
 }
@@ -28,9 +28,10 @@ controller_setup(double kp_amps)
  *  A non-finite input or result (which a valid AI1 reading cannot produce) gives 0 A.
  */
 pid_log_t
-controller_update(double r_mm, double y_mm)
+controller_update(const pos_ctrl_in_t *in)
 {
    const double dt_s = CYCLE_TIME_MS / 1000.0;
+   const double r_mm = in->r_mm, y_mm = in->y_mm;
    if (!isfinite(r_mm) || !isfinite(y_mm))
    {
       /* Cannot happen with a valid int16 AI1 reading; command 0 A and leave the integrator alone. */
@@ -40,18 +41,18 @@ controller_update(double r_mm, double y_mm)
    double p_A = PID_KP_A_PER_MM * e_mm;
    double i_A = pi_integrator_A + PID_KI_A_PER_MM_S * e_mm * dt_s;
    double unsat_A = p_A + i_A;
-   if ((unsat_A > PID_OUTPUT_LIMIT_A && e_mm > 0.0) || (unsat_A < -PID_OUTPUT_LIMIT_A && e_mm < 0.0))
+   if ((unsat_A > OUTPUT_LIMIT_A && e_mm > 0.0) || (unsat_A < -OUTPUT_LIMIT_A && e_mm < 0.0))
    {
       i_A = pi_integrator_A;                                 /* saturated: hold the integrator */
    }
-   i_A = clamp_abs(i_A, PID_OUTPUT_LIMIT_A);
+   i_A = clamp_abs(i_A, OUTPUT_LIMIT_A);
    if (!isfinite(i_A))
    {
       i_A = 0.0;
    }
    pi_integrator_A = i_A;
 
-   double u_A = clamp_abs(p_A + i_A, PID_OUTPUT_LIMIT_A);
+   double u_A = clamp_abs(p_A + i_A, OUTPUT_LIMIT_A);
    if (!isfinite(u_A))
    {
       u_A = 0.0;
