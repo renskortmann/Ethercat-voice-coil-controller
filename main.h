@@ -27,153 +27,12 @@
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
-#define RUN_DURATION_S      128.0 /**< Experiment (excitation) phase duration in seconds, after the bias idle window */
-/** 0 A rest period before the experiment starts, used to measure the accelerometer (AI2) bias.
- *  Timestamps are shifted so this window has negative time (-BIAS_IDLE_S .. 0) and the excitation
- *  still starts at t = 0. Total loop time is BIAS_IDLE_S + RUN_DURATION_S. export_csv() subtracts
- *  the mean AI2 voltage over this window to produce the ai2_corrected_V column. */
-#define BIAS_IDLE_S         3.0
+#include "run_settings.h"  /* EXPERIMENT_MODE, RUN_DURATION_S, BIAS_IDLE_S */
 #define CSV_DIR             "gcsc_data" /**< Output directory for CSV logs */
-
-/** \brief Experiment selection (compile-time). Only the per-cycle setpoint changes between
- *  experiments; scaling, PDO exchange, fault checks, timing and logging are shared. */
-#define EXPERIMENT_SINE          0   /**< Feedforward sine current (SINE_FREQ_HZ, SINE_AMPLITUDE_A) */
-#define EXPERIMENT_STEP_RELEASE  1   /**< Hold a constant current, then release to zero and record the free response */
-#define EXPERIMENT_CHIRP         2   /**< Exponential current sweep CHIRP_F0_HZ -> CHIRP_F1_HZ, then 0 A */
-#define EXPERIMENT_PRBS          3   /**< Pseudo-random binary current +/-PRBS_AMPLITUDE_A, then 0 A */
-#define EXPERIMENT_CHIRP_SCHEDULED 4 /**< Same sweep as EXPERIMENT_CHIRP, amplitude follows CHIRP_SCHED */
-#define EXPERIMENT_NOISE         5   /**< 0 A for the whole run with the drive enabled: sensor noise floor */
-#define EXPERIMENT_SINE_BLOCKS   6   /**< Sequence of ramped constant-frequency sine blocks from SINE_BLOCKS */
-#define EXPERIMENT_MODE          EXPERIMENT_SINE_BLOCKS /**< Select the experiment to run (compile-time). A new mode also needs an EXPERIMENT_TAG case below. */
-
-
-/** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
-#define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
-#define SINE_AMPLITUDE_A    5.0  /**< Target current waveform amplitude in Amps */
-
-
-/** \brief Step-release experiment parameters (EXPERIMENT_STEP_RELEASE) */
-#define HOLD_CURRENT_A      7.5  /**< Constant current during the hold phase, in Amps (sign = direction) */
-#define HOLD_RAMP_S         0.2  /**< Linear ramp 0 -> HOLD_CURRENT_A at the start of the hold; 0 for a hard step */
-#define HOLD_DURATION_S     20.0  /**< Time from loop start to release, in seconds (includes the ramp) */
-#if EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
-/* Integer casts because a static assertion needs an integer constant expression; ms resolution. */
-_Static_assert((int)(HOLD_DURATION_S * 1000) < (int)(RUN_DURATION_S * 1000),
-               "HOLD_DURATION_S must be shorter than RUN_DURATION_S, otherwise the release never happens");
-#endif
-
-
-/** \brief Chirp experiment parameters (EXPERIMENT_CHIRP). Instantaneous frequency is
- *  f(t) = CHIRP_F0_HZ * (CHIRP_F1_HZ / CHIRP_F0_HZ)^(t / CHIRP_DURATION_S), so every decade
- *  gets the same sweep time. After CHIRP_DURATION_S the current is 0 A for the rest of the run. */
-#define CHIRP_AMPLITUDE_A   6.0   /**< Current amplitude in Amps */
-#define CHIRP_F0_HZ         10.0   /**< Start frequency in Hz (> 0) */
-#define CHIRP_F1_HZ         55.0 /**< End frequency in Hz */
-#define CHIRP_DURATION_S    120.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
-#if EXPERIMENT_MODE == EXPERIMENT_CHIRP || EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
-_Static_assert((int)(CHIRP_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),
-               "CHIRP_DURATION_S must not exceed RUN_DURATION_S");
-_Static_assert((int)(CHIRP_F0_HZ * 1000) > 0 && (int)(CHIRP_F0_HZ * 1000) != (int)(CHIRP_F1_HZ * 1000),
-               "CHIRP_F0_HZ must be > 0 and differ from CHIRP_F1_HZ (the sweep rate divides by ln(f1/f0))");
-/* 10 samples per period at the highest frequency: CHIRP_F1_HZ <= 200 Hz at a 0.5 ms cycle. */
-_Static_assert((int)(CHIRP_F1_HZ * CYCLE_TIME_MS) <= 100,
-               "CHIRP_F1_HZ too high for CYCLE_TIME_MS: fewer than 10 samples per period");
-#endif
-
-
-/** \brief Scheduled-amplitude chirp parameters (EXPERIMENT_CHIRP_SCHEDULED). The frequency sweep
- *  uses CHIRP_F0_HZ, CHIRP_F1_HZ and CHIRP_DURATION_S above; CHIRP_AMPLITUDE_A is not used.
- *  CHIRP_SCHED lists X(time_s, amplitude_A) breakpoints: at time_s the amplitude ramps
- *  linearly from the previous breakpoint's value to amplitude_A over CHIRP_SCHED_RAMP_S, then holds.
- *  The first entry must be at t = 0 (the starting amplitude, no ramp-in); times strictly increasing,
- *  each ramp must end before the next breakpoint and the last breakpoint must be < CHIRP_DURATION_S.
- *  Checked at startup by fieldbus_run_cyclic(), which also rejects amplitudes above the drive peak current.
- *  Write the numbers with a decimal point (6.0, not 6): they are copied verbatim into the file name. */
-#define CHIRP_SCHED(X)      X(0.0, 3.0) X(30.0, 7.0) X(60.0, 14.0)
-#define CHIRP_SCHED_RAMP_S  30.0       /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
-/** \brief Breakpoint table and file-name label, both generated from CHIRP_SCHED so they can't
- *  disagree. The label is e.g. "0.0s6.0A-60.0s15.0A-r30.0s": each breakpoint as <time>s<amplitude>A,
- *  then the ramp time. */
-#define CHIRP_SCHED_ENTRY_(t, a)  {t, a},
-#define CHIRP_SCHED_TABLE         { CHIRP_SCHED(CHIRP_SCHED_ENTRY_) }
-#define CHIRP_SCHED_LABEL_(t, a)  STRINGIFY(t) "s" STRINGIFY(a) "A-"
-#define CHIRP_SCHED_NAME          CHIRP_SCHED(CHIRP_SCHED_LABEL_) "r" STRINGIFY(CHIRP_SCHED_RAMP_S) "s"
-
-
-/** \brief Sine-block experiment parameters (EXPERIMENT_SINE_BLOCKS). SINE_BLOCKS lists
- *  X(freq_Hz, amplitude_A) blocks, run back to back. Each block: linear ramp-in over
- *  SINE_BLOCK_RAMP_S, full amplitude for SINE_BLOCK_HOLD_S (the analysis window), linear ramp-out
- *  over SINE_BLOCK_RAMP_S, then SINE_BLOCK_PAUSE_S at 0 A. The sine phase restarts at 0 at each
- *  block start. Block k's hold window is t = k * SINE_BLOCK_PERIOD_S + SINE_BLOCK_RAMP_S .. + SINE_BLOCK_HOLD_S.
- *  Amplitudes are checked against the drive peak current at startup by fieldbus_run_cyclic().
- *  Write the numbers with a decimal point (6.0, not 6): they are copied verbatim into the file name. */
-#define SINE_BLOCKS(X)      X(10.0, 10.0) X(20.0, 15.0) X(40.0, 20.0) X(50.0, 22.0)
-#define SINE_BLOCK_RAMP_S   5.0   /**< Linear ramp-in and ramp-out time per block, in seconds (> 0) */
-#define SINE_BLOCK_HOLD_S   20.0  /**< Full-amplitude time per block, in seconds */
-#define SINE_BLOCK_PAUSE_S  2.0   /**< 0 A after each block (including the last), in seconds */
-#define SINE_BLOCK_PERIOD_S (2.0 * SINE_BLOCK_RAMP_S + SINE_BLOCK_HOLD_S + SINE_BLOCK_PAUSE_S)
-/** \brief Block table, count and file-name label, all generated from SINE_BLOCKS. The label is
- *  e.g. "10.0Hz5.0A-20.0Hz10.0A": each block as <freq>Hz<amplitude>A. */
-#define SINE_BLOCKS_ENTRY_(f, a)  {f, a},
-#define SINE_BLOCKS_TABLE         { SINE_BLOCKS(SINE_BLOCKS_ENTRY_) }
-#define SINE_BLOCKS_ONE_(f, a)    + 1
-#define SINE_BLOCKS_COUNT         (0 SINE_BLOCKS(SINE_BLOCKS_ONE_))
-#define SINE_BLOCKS_FREQ_OK_(f, a) && (int)((f) * 1000) > 0 && (int)((f) * CYCLE_TIME_MS) <= 100
-#define SINE_BLOCKS_LABEL_(f, a)  STRINGIFY(f) "Hz" STRINGIFY(a) "A-"
-#define SINE_BLOCKS_NAME          SINE_BLOCKS(SINE_BLOCKS_LABEL_)
-#if EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
-_Static_assert((int)(SINE_BLOCKS_COUNT * SINE_BLOCK_PERIOD_S * 1000) <= (int)(RUN_DURATION_S * 1000),
-               "SINE_BLOCKS do not fit in RUN_DURATION_S (count * SINE_BLOCK_PERIOD_S)");
-_Static_assert((int)(SINE_BLOCK_RAMP_S * 1000) > 0, "SINE_BLOCK_RAMP_S must be > 0");
-/* 10 samples per period at each block frequency: <= 200 Hz at a 0.5 ms cycle. */
-_Static_assert(1 SINE_BLOCKS(SINE_BLOCKS_FREQ_OK_),
-               "SINE_BLOCKS frequency must be > 0 and give at least 10 samples per period at CYCLE_TIME_MS");
-#endif
-
-/** \brief PRBS experiment parameters (EXPERIMENT_PRBS). A 15-bit maximum-length LFSR
- *  (period 32767 bits, fixed seed) sets the current to +A or -A, each bit held for
- *  PRBS_HOLD_CYCLES cycles. The power spectrum follows sinc^2(f * T_bit) and is about 2 dB down
- *  at 0.4 / T_bit >= PRBS_BANDWIDTH_HZ. After PRBS_DURATION_S the current is 0 A. */
-#define PRBS_AMPLITUDE_A    5.0   /**< Current level in Amps: output is +A or -A */
-#define PRBS_BANDWIDTH_HZ   55.0  /**< Upper frequency of the flat part of the spectrum, in Hz (<= 60) */
-#define PRBS_DURATION_S     120.0 /**< Sequence length in seconds, <= RUN_DURATION_S */
-/** Cycles per PRBS bit: longest hold with 0.4 / T_bit >= PRBS_BANDWIDTH_HZ (13 at 60 Hz, 0.5 ms). */
-#define PRBS_HOLD_CYCLES    ((int)(400.0 / (PRBS_BANDWIDTH_HZ * CYCLE_TIME_MS)))
-#if EXPERIMENT_MODE == EXPERIMENT_PRBS
-_Static_assert((int)(PRBS_DURATION_S * 1000) <= (int)(RUN_DURATION_S * 1000),
-               "PRBS_DURATION_S must not exceed RUN_DURATION_S");
-_Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
-               "PRBS_BANDWIDTH_HZ must not exceed 60 Hz");
-#endif
 
 /** \brief Stringize a macro's expanded value (two levels so the argument is expanded first) */
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x)  STRINGIFY_(x)
-/** \brief Experiment mode + parameters as a filename-safe tag, built at compile time from the
- *  macros above so the values are never duplicated by hand. Used by export_csv() to name the
- *  CSV files, e.g. voice_coil_log_sine_15.0Hz_5.0A_YYYYMMDD_HHMMSS.csv */
-#if EXPERIMENT_MODE == EXPERIMENT_SINE
-#define EXPERIMENT_TAG "sine_" STRINGIFY(SINE_FREQ_HZ) "Hz_" STRINGIFY(SINE_AMPLITUDE_A) "A"
-#elif EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
-#define EXPERIMENT_TAG "step_release_hold" STRINGIFY(HOLD_CURRENT_A) "A_ramp" STRINGIFY(HOLD_RAMP_S) \
-                       "s_dur" STRINGIFY(HOLD_DURATION_S) "s"
-#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
-#define EXPERIMENT_TAG "chirp_" STRINGIFY(CHIRP_AMPLITUDE_A) "A_" STRINGIFY(CHIRP_F0_HZ) "to" \
-                       STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
-#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
-#define EXPERIMENT_TAG "chirpsched_" CHIRP_SCHED_NAME "_" STRINGIFY(CHIRP_F0_HZ) "to" \
-                       STRINGIFY(CHIRP_F1_HZ) "Hz_" STRINGIFY(CHIRP_DURATION_S) "s"
-#elif EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
-#define EXPERIMENT_TAG "sineblocks_" SINE_BLOCKS_NAME "r" STRINGIFY(SINE_BLOCK_RAMP_S) "s_h" \
-                       STRINGIFY(SINE_BLOCK_HOLD_S) "s_p" STRINGIFY(SINE_BLOCK_PAUSE_S) "s"
-#elif EXPERIMENT_MODE == EXPERIMENT_NOISE
-#define EXPERIMENT_TAG "noise_0A_" STRINGIFY(RUN_DURATION_S) "s"
-#elif EXPERIMENT_MODE == EXPERIMENT_PRBS
-#define EXPERIMENT_TAG "prbs_" STRINGIFY(PRBS_AMPLITUDE_A) "A_" STRINGIFY(PRBS_BANDWIDTH_HZ) "Hz_" \
-                       STRINGIFY(PRBS_DURATION_S) "s"
-#else
-#error "Unknown EXPERIMENT_MODE"
-#endif
 
 #define MAX_SAMPLES         ((int)((BIAS_IDLE_S + RUN_DURATION_S) / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000
@@ -217,6 +76,15 @@ _Static_assert((int)(PRBS_BANDWIDTH_HZ * 1000) <= 60000,
 #define AI1_MM_OFFSET      22.5
 #define AI1_CENTRE_MM      51.7    // Laser distance with the shaft at rest
 #define AI1_POSITION_SIGN  -1.0    // -1
+
+/** \brief Shaft position in mm from a raw AI1 PDO value (DAI units -> volts -> mm, calibration above).
+ *  The single conversion used by both the position controller and the CSV log, so they cannot disagree. */
+static inline double
+ai1_raw_to_position_mm(int16_t ai1_raw)
+{
+   double ai1_V = ai1_raw / DAI_SCALE;
+   return AI1_POSITION_SIGN * (AI1_MM_SCALE * ai1_V + AI1_MM_OFFSET - AI1_CENTRE_MM);
+}
 
 // PDO object indices for CiA402 current control
 #define ACTUAL_CURRENT_INDEX           0x6077    // Actual current (DC1) in 16-bit signed integer format
@@ -283,7 +151,8 @@ typedef enum
    FAULT_WKC_ERROR = 0,            /**< Working Counter validation failure */
    FAULT_ALstatuscode_CHANGE = 1,  /**< Drive reported non-zero ALstatuscode (reserved for expansion) */
    FAULT_STATE_DRIFT = 2,          /**< Unexpected CiA402 state transition detected */
-   FAULT_DRIVE_STATUS_FLAG = 3     /**< Drive status flags (2002h) indicate fault condition */
+   FAULT_DRIVE_STATUS_FLAG = 3,    /**< Drive status flags (2002h) indicate fault condition */
+   FAULT_POSITION_LIMIT = 4        /**< position_mm outside POS_TRIP_MIN/MAX_MM for POS_TRIP_CYCLES cycles */
 } fault_type_t;
 
 /** \brief Recovery actions taken in response to detected faults */
@@ -317,8 +186,31 @@ typedef struct
    double energy_J;          /**< Cumulative energy delivered to the motor up to and including this sample */
    double cycle_jitter_us;   /**< Signed offset between actual and scheduled cycle time (positive = late) */
    double pdo_exchange_us;   /**< Time spent in ecx_send_processdata + ecx_receive_processdata (frame round-trip) */
-   double position_mm;       /**< Shaft displacement from centre in mm, derived from ai1_value_V (AI1_* calibration); last CSV column */
+   double position_mm;       /**< Shaft displacement from centre in mm, derived from ai1_value_V (AI1_* calibration) */
+   double position_ref_mm;   /**< Position reference in mm (nan outside a position-control run or during the idle window) */
+   double pid_p_A;           /**< PI: proportional term; SMC: equivalent (model) control; in Amps (nan outside a position-control run) */
+   double pid_i_A;           /**< PI: integrator; SMC: switching term -eta sat(s / phi) / g; in Amps (nan outside a position-control run) */
+   double pid_output_A;      /**< Saturated controller output in Amps, commanded in the NEXT cycle (nan outside a position-control run) */
+   double position_filt_mm;  /**< Position after the filters: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE, not with the SMC) (nan outside a position-control run) */
+   double kf_velocity_mm_s;  /**< EKF velocity estimate v(k|k) in mm/s (nan unless POS_KF_ENABLE) */
+   double kf_innovation_mm;  /**< EKF innovation y(k) - x(k|k-1) in mm (nan unless POS_KF_ENABLE) */
+   double kf_innov_std_mm;   /**< EKF predicted innovation std sqrt(S) in mm (nan unless POS_KF_ENABLE) */
+   double kf_pickup_mm;      /**< EKF mains pickup estimate on the laser in mm (nan unless POS_KF_MAINS_ENABLE) */
 } sample_log_entry_t;
+
+/** \brief Position controller values for one cycle, passed to log_sample() */
+typedef struct
+{
+   double position_ref_mm;   /**< Reference r_k in mm (nan during the idle window) */
+   double p_A;               /**< PI: Kp * e_k; SMC: equivalent (model) control; in Amps */
+   double i_A;               /**< PI: integrator after this cycle's update; SMC: switching term; in Amps */
+   double output_A;          /**< Saturated controller output in Amps, sent to the drive in the next cycle */
+   double position_filt_mm;  /**< Position after the filters: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE, not with the SMC) */
+   double kf_velocity_mm_s;  /**< EKF velocity estimate v(k|k) in mm/s (nan unless POS_KF_ENABLE) */
+   double kf_innovation_mm;  /**< EKF innovation y(k) - x(k|k-1) in mm (nan unless POS_KF_ENABLE) */
+   double kf_innov_std_mm;   /**< EKF predicted innovation std sqrt(S) in mm (nan unless POS_KF_ENABLE) */
+   double kf_pickup_mm;      /**< EKF mains pickup estimate on the laser in mm (nan unless POS_KF_MAINS_ENABLE) */
+} pid_log_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
 typedef struct
@@ -348,7 +240,7 @@ boolean cia402_bring_up(Fieldbus *fieldbus);
 void add_timespec(struct timespec *ts, int64_t addus);
 boolean fieldbus_run_cyclic(Fieldbus *fieldbus);
 void log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
-                double cycle_jitter_us, double pdo_exchange_us);
+                double cycle_jitter_us, double pdo_exchange_us, const pid_log_t *pid);
 void log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
                uint32_t fault_detail, recovery_action_t recovery_action);
 void read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s);

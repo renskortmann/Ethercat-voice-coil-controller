@@ -3,6 +3,8 @@
  */
 
 #include "main.h"
+#include "open_loop_current.h"
+#include "closed_loop_position.h"
 
 /** \brief Add microseconds to a struct timespec, handling nanosecond overflow
  *  \param ts Pointer to timespec to modify in-place
@@ -31,209 +33,29 @@ timespec_diff_us(const struct timespec *end, const struct timespec *start)
           (double)(end->tv_nsec - start->tv_nsec) / 1000.0;
 }
 
-#if EXPERIMENT_MODE == EXPERIMENT_CHIRP || EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
-/** \brief Unit-amplitude exponential chirp CHIRP_F0_HZ -> CHIRP_F1_HZ over CHIRP_DURATION_S
- *  \param t Time since the start of the sweep in seconds (0 <= t < CHIRP_DURATION_S)
- *  \return sin(phase(t)), in [-1, 1]
+/** \brief Largest raw target current magnitude. Symmetric on purpose: +32768 does not fit the int16_t
+ *  RxPDO field and would wrap to -32768, i.e. a full positive command reaching the drive as full reverse. */
+#define TARGET_CURRENT_RAW_MAX 32767.0
+
+/** \brief Convert a target current in Amps to the raw RxPDO value (6071h, scale 2^15 / KP)
+ *  Every step is done in double and clamped before the one integer conversion, so the result is
+ *  always in range: no int16 wrap, and no undefined behaviour from converting NaN, inf or an
+ *  out-of-range double to an integer.
+ *  \param amps Target current in Amps
+ *  \param kp_amps Drive peak current (KP); 0 if the SDO read at startup failed
+ *  \return Raw value in [-32767, 32767] (+/-KP); 0 if amps is not finite or kp_amps is not > 0
  */
-static double
-chirp_unit(double t)
+static int16_t
+amps_to_target_current_raw(double amps, double kp_amps)
 {
-   /* Phase is the integral of f(t) = f0 * exp(t / L), with L = T / ln(f1 / f0). */
-   const double L = CHIRP_DURATION_S / log(CHIRP_F1_HZ / CHIRP_F0_HZ);
-   return sin(2.0 * M_PI * CHIRP_F0_HZ * L * (exp(t / L) - 1.0));
-}
-#endif
-
-#if EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
-/** \brief Amplitude breakpoints from CHIRP_SCHED_TABLE, validated by chirp_sched_check() */
-static const struct
-{
-   double t_s;      /**< Time the ramp to amp_A starts, in seconds */
-   double amp_A;    /**< Amplitude after the ramp, in Amps */
-} chirp_sched[] = CHIRP_SCHED_TABLE;
-#define CHIRP_SCHED_N ((int)(sizeof(chirp_sched) / sizeof(chirp_sched[0])))
-
-/** \brief Chirp amplitude envelope at time t: the last breakpoint at or before t, ramped in
- *  linearly from the previous breakpoint's amplitude over CHIRP_SCHED_RAMP_S
- *  \param t Time since the start of the sweep in seconds (t >= 0)
- *  \return Amplitude in Amps
- */
-static double
-chirp_sched_amplitude_A(double t)
-{
-   int i = 0;
-   while (i + 1 < CHIRP_SCHED_N && chirp_sched[i + 1].t_s <= t)
+   if (!isfinite(amps) || !(kp_amps > 0.0))
    {
-      i++;
+      return 0;
    }
-   double into_ramp_s = t - chirp_sched[i].t_s;
-   if (i > 0 && CHIRP_SCHED_RAMP_S > 0.0 && into_ramp_s < CHIRP_SCHED_RAMP_S)
-   {
-      double prev_A = chirp_sched[i - 1].amp_A;
-      return prev_A + (chirp_sched[i].amp_A - prev_A) * (into_ramp_s / CHIRP_SCHED_RAMP_S);
-   }
-   return chirp_sched[i].amp_A;
-}
-
-/** \brief Check CHIRP_SCHED_TABLE before the run (doubles rule out a _Static_assert)
- *  \param kp_amps Drive peak current; larger amplitudes would be clipped by the saturation
- *  \return TRUE if the table is usable, FALSE (with a message printed) otherwise
- */
-static boolean
-chirp_sched_check(double kp_amps)
-{
-   if (chirp_sched[0].t_s != 0.0)
-   {
-      printf("CHIRP_SCHED: first breakpoint must be at t = 0 s (is %.3f s)\n", chirp_sched[0].t_s);
-      return FALSE;
-   }
-   for (int i = 0; i < CHIRP_SCHED_N; i++)
-   {
-      if (fabs(chirp_sched[i].amp_A) > kp_amps)
-      {
-         printf("CHIRP_SCHED: %.2f A at t = %.3f s exceeds the drive peak current %.1f A\n",
-                chirp_sched[i].amp_A, chirp_sched[i].t_s, kp_amps);
-         return FALSE;
-      }
-      if (chirp_sched[i].t_s >= CHIRP_DURATION_S)
-      {
-         printf("CHIRP_SCHED: breakpoint at t = %.3f s is not before CHIRP_DURATION_S (%.1f s)\n",
-                chirp_sched[i].t_s, CHIRP_DURATION_S);
-         return FALSE;
-      }
-      if (i > 0 && chirp_sched[i].t_s < chirp_sched[i - 1].t_s + CHIRP_SCHED_RAMP_S)
-      {
-         printf("CHIRP_SCHED: breakpoint at t = %.3f s starts before the ramp at t = %.3f s ends "
-                "(times must increase by at least CHIRP_SCHED_RAMP_S = %.3f s)\n",
-                chirp_sched[i].t_s, chirp_sched[i - 1].t_s, CHIRP_SCHED_RAMP_S);
-         return FALSE;
-      }
-   }
-   return TRUE;
-}
-#endif
-
-#if EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
-/** \brief Sine blocks from SINE_BLOCKS_TABLE, validated by sine_blocks_check() */
-static const struct
-{
-   double f_Hz;     /**< Sine frequency in Hz */
-   double amp_A;    /**< Amplitude during the hold, in Amps */
-} sine_blocks[] = SINE_BLOCKS_TABLE;
-#define SINE_BLOCKS_N ((int)(sizeof(sine_blocks) / sizeof(sine_blocks[0])))
-
-/** \brief Sine-block current at time t: ramp-in, hold, ramp-out, pause per block, then 0 A
- *  \param t Time since the start of the first block in seconds (t >= 0)
- *  \return Target current in Amps
- */
-static double
-sine_blocks_current_A(double t)
-{
-   int k = (int)(t / SINE_BLOCK_PERIOD_S);
-   if (k >= SINE_BLOCKS_N)
-   {
-      return 0.0;                                            /* all blocks done: ring-down */
-   }
-   double tb = t - k * SINE_BLOCK_PERIOD_S;                  /* time into block k */
-   double envelope;
-   if (tb < SINE_BLOCK_RAMP_S)
-   {
-      envelope = tb / SINE_BLOCK_RAMP_S;                     /* ramp in */
-   }
-   else if (tb < SINE_BLOCK_RAMP_S + SINE_BLOCK_HOLD_S)
-   {
-      envelope = 1.0;                                        /* hold */
-   }
-   else if (tb < 2.0 * SINE_BLOCK_RAMP_S + SINE_BLOCK_HOLD_S)
-   {
-      envelope = (2.0 * SINE_BLOCK_RAMP_S + SINE_BLOCK_HOLD_S - tb) / SINE_BLOCK_RAMP_S;  /* ramp out */
-   }
-   else
-   {
-      return 0.0;                                            /* pause */
-   }
-   return sine_blocks[k].amp_A * envelope * sin(2.0 * M_PI * sine_blocks[k].f_Hz * tb);
-}
-
-/** \brief Check SINE_BLOCKS_TABLE before the run (doubles rule out a _Static_assert)
- *  \param kp_amps Drive peak current; larger amplitudes would be clipped by the saturation
- *  \return TRUE if the table is usable, FALSE (with a message printed) otherwise
- */
-static boolean
-sine_blocks_check(double kp_amps)
-{
-   for (int i = 0; i < SINE_BLOCKS_N; i++)
-   {
-      if (fabs(sine_blocks[i].amp_A) > kp_amps)
-      {
-         printf("SINE_BLOCKS: %.2f A in block %d (%.2f Hz) exceeds the drive peak current %.1f A\n",
-                sine_blocks[i].amp_A, i, sine_blocks[i].f_Hz, kp_amps);
-         return FALSE;
-      }
-   }
-   return TRUE;
-}
-#endif
-
-/** \brief Target current for this cycle, in Amps, for the experiment selected by EXPERIMENT_MODE
- *  This is the only experiment-specific code in the cyclic loop. It must stay cheap and
- *  allocation-free: it runs once per cycle inside the real-time loop.
- *  \param elapsed_s Elapsed loop time in seconds (cycle_count * cycle time)
- *  \return Target current in Amps (converted to raw drive units by the caller)
- */
-static double
-experiment_target_current_A(double elapsed_s)
-{
-#if EXPERIMENT_MODE == EXPERIMENT_SINE
-   return SINE_AMPLITUDE_A * sin(2.0 * M_PI * SINE_FREQ_HZ * elapsed_s);
-#elif EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
-   if (elapsed_s >= HOLD_DURATION_S)
-   {
-      return 0.0;                                            /* released: free response */
-   }
-   if (HOLD_RAMP_S > 0.0 && elapsed_s < HOLD_RAMP_S)
-   {
-      return HOLD_CURRENT_A * (elapsed_s / HOLD_RAMP_S);     /* ramp in */
-   }
-   return HOLD_CURRENT_A;                                    /* hold */
-#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
-   if (elapsed_s >= CHIRP_DURATION_S)
-   {
-      return 0.0;                                            /* sweep done: ring-down */
-   }
-   return CHIRP_AMPLITUDE_A * chirp_unit(elapsed_s);
-#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
-   if (elapsed_s >= CHIRP_DURATION_S)
-   {
-      return 0.0;                                            /* sweep done: ring-down */
-   }
-   return chirp_sched_amplitude_A(elapsed_s) * chirp_unit(elapsed_s);
-#elif EXPERIMENT_MODE == EXPERIMENT_PRBS
-   static uint16_t lfsr = 1;      /* 15-bit LFSR state; nonzero seed, fixed so every run repeats */
-   static long bit_index = 0;     /* index of the PRBS bit held in lfsr */
-   if (elapsed_s >= PRBS_DURATION_S)
-   {
-      return 0.0;                                            /* sequence done: ring-down */
-   }
-   /* Cycle index from elapsed time; rounding absorbs floating-point error in elapsed_s. */
-   long target_bit = lround(elapsed_s * 1000.0 / CYCLE_TIME_MS) / PRBS_HOLD_CYCLES;
-   while (bit_index < target_bit)
-   {
-      /* Fibonacci LFSR, polynomial x^15 + x^14 + 1 (maximal length, period 32767) */
-      uint16_t bit = ((lfsr >> 14) ^ (lfsr >> 13)) & 1u;
-      lfsr = (uint16_t)(((lfsr << 1) | bit) & 0x7FFFu);
-      bit_index++;
-   }
-   return (lfsr & 1u) ? PRBS_AMPLITUDE_A : -PRBS_AMPLITUDE_A;
-#elif EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
-   return sine_blocks_current_A(elapsed_s);
-#elif EXPERIMENT_MODE == EXPERIMENT_NOISE
-   (void)elapsed_s;
-   return 0.0;                                               /* noise floor: drive enabled, no excitation */
-#else
-#error "Unknown EXPERIMENT_MODE"
-#endif
+   double raw = amps * DC2_SCALE / kp_amps;
+   if (raw > TARGET_CURRENT_RAW_MAX) raw = TARGET_CURRENT_RAW_MAX;
+   if (raw < -TARGET_CURRENT_RAW_MAX) raw = -TARGET_CURRENT_RAW_MAX;
+   return (int16_t)lround(raw);
 }
 
 /** \brief Run the real-time control loop: generate experiment setpoints, exchange PDO, monitor faults
@@ -260,7 +82,6 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    int64_t cycle_ns = (int64_t)(CYCLE_TIME_MS * 1000000);
    double elapsed_s = -BIAS_IDLE_S;  /* negative during the bias idle window; 0 = experiment start */
    double target_current_A;
-   int32_t target_current_raw;
    double cycle_jitter_us;
    double pdo_exchange_us;
    double max_pdo_exchange_us = 0.0;
@@ -274,50 +95,23 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    boolean state_drift_detected = FALSE;
    int missed_deadline_count = 0;
    double max_jitter_us = 0.0;
-
-#if EXPERIMENT_MODE == EXPERIMENT_SINE
-   printf("\nExperiment: sine, %.1f Hz, %.2f A amplitude\n", SINE_FREQ_HZ, SINE_AMPLITUDE_A);
-#elif EXPERIMENT_MODE == EXPERIMENT_STEP_RELEASE
-   printf("\nExperiment: step-release, hold %.2f A (ramp %.2f s) until t = %.2f s, then release to 0 A\n",
-          HOLD_CURRENT_A, HOLD_RAMP_S, HOLD_DURATION_S);
-#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP
-   printf("\nExperiment: exponential chirp, %.2f A, %.2f -> %.2f Hz over %.2f s, then 0 A\n",
-          CHIRP_AMPLITUDE_A, CHIRP_F0_HZ, CHIRP_F1_HZ, CHIRP_DURATION_S);
-#elif EXPERIMENT_MODE == EXPERIMENT_CHIRP_SCHEDULED
-   printf("\nExperiment: exponential chirp, scheduled amplitude, %.2f -> %.2f Hz over %.2f s, then 0 A\n",
-          CHIRP_F0_HZ, CHIRP_F1_HZ, CHIRP_DURATION_S);
-   for (int i = 0; i < CHIRP_SCHED_N; i++)
-   {
-      printf("  t = %7.2f s -> %.2f A%s\n", chirp_sched[i].t_s, chirp_sched[i].amp_A,
-             i > 0 && CHIRP_SCHED_RAMP_S > 0.0 ? " (linear ramp)" : "");
-   }
-   if (CHIRP_SCHED_RAMP_S > 0.0)
-   {
-      printf("  ramp time %.2f s\n", CHIRP_SCHED_RAMP_S);
-   }
-   if (!chirp_sched_check(fieldbus->kp_amps))
-   {
-      return FALSE;
-   }
-#elif EXPERIMENT_MODE == EXPERIMENT_PRBS
-   printf("\nExperiment: PRBS, +/-%.2f A, bandwidth %.1f Hz (%d cycles per bit) for %.2f s, then 0 A\n",
-          PRBS_AMPLITUDE_A, PRBS_BANDWIDTH_HZ, PRBS_HOLD_CYCLES, PRBS_DURATION_S);
-#elif EXPERIMENT_MODE == EXPERIMENT_SINE_BLOCKS
-   printf("\nExperiment: %d sine blocks, each %.1f s ramp-in, %.1f s hold, %.1f s ramp-out, %.1f s at 0 A\n",
-          SINE_BLOCKS_N, SINE_BLOCK_RAMP_S, SINE_BLOCK_HOLD_S, SINE_BLOCK_RAMP_S, SINE_BLOCK_PAUSE_S);
-   for (int i = 0; i < SINE_BLOCKS_N; i++)
-   {
-      double hold_start_s = i * SINE_BLOCK_PERIOD_S + SINE_BLOCK_RAMP_S;
-      printf("  block %d: %6.2f Hz, %5.2f A, hold t = %7.2f .. %7.2f s\n", i, sine_blocks[i].f_Hz,
-             sine_blocks[i].amp_A, hold_start_s, hold_start_s + SINE_BLOCK_HOLD_S);
-   }
-   if (!sine_blocks_check(fieldbus->kp_amps))
-   {
-      return FALSE;
-   }
-#elif EXPERIMENT_MODE == EXPERIMENT_NOISE
-   printf("\nExperiment: noise, 0 A with the drive enabled for %.2f s\n", RUN_DURATION_S);
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+   double next_current_A = 0.0;   /* controller output from the previous cycle's measurement; 0 A until the first update */
+   pid_log_t pid;                 /* this cycle's controller values, for the log */
+   double position_mm;            /* raw, used by the trip check */
+   boolean pos_trip_detected = FALSE;
+   double pos_trip_position_mm = 0.0;
 #endif
+
+   /* Print the experiment and check its settings (closed_loop_position.c / open_loop_current.c) */
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+   if (!closed_loop_setup(fieldbus->kp_amps))
+#else
+   if (!open_loop_setup(fieldbus->kp_amps))
+#endif
+   {
+      return FALSE;
+   }
    printf("Bias window: %.1f s at 0 A before the experiment (t < 0) to measure the accelerometer offset\n",
           BIAS_IDLE_S);
    printf("Starting %.0f-second cyclic loop (%.0f s idle + %.0f s experiment)... expected WKC: %d\n",
@@ -340,21 +134,23 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       /* Bias idle window (t < 0): hold 0 A with the drive enabled, so the accelerometer offset is
        * measured in the same electrical conditions as the run. The experiment functions only ever
        * see t >= 0 (PRBS derives its bit index from elapsed_s and assumes it is non-negative). */
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+      /* Closed loop: send the controller output computed at the end of the previous cycle from the
+       * position received then. The controller runs right after the exchange below, so measurement,
+       * trip check, controller and log row all use the same received position. */
+      target_current_A = next_current_A;
+#else
       if (elapsed_s < 0.0)
       {
          target_current_A = 0.0;
       }
       else
       {
-         target_current_A = experiment_target_current_A(elapsed_s);
+         target_current_A = open_loop_current_A(elapsed_s);
       }
+#endif
 
-      /* Convert to raw Int32 (scale: 2^15 / KP) */
-      target_current_raw = (int32_t)round((target_current_A * DC2_SCALE) / fieldbus->kp_amps);
-      if (target_current_raw > DC2_SCALE) target_current_raw = DC2_SCALE;  /* Saturate to max DC2 */
-      if (target_current_raw < -DC2_SCALE) target_current_raw = -DC2_SCALE;  /* Saturate to min -DC2 */
-
-      rx->target_current = target_current_raw;
+      rx->target_current = amps_to_target_current_raw(target_current_A, fieldbus->kp_amps);
 
       /* Send and receive process data. Time this separately from the rest of the cycle:
        * it's the frame round-trip (NIC driver + wire + slave + housekeeping-core IRQ servicing), so a
@@ -400,6 +196,31 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          break;
       }
 
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+      /* Raw position from this cycle's exchange. The trip checks it unfiltered over the whole run,
+       * idle window included: a laser fault (signal lost reads about +29 mm) or a shaft outside the
+       * window stops the run. */
+      position_mm = ai1_raw_to_position_mm(tx->ai1_value);
+      if (closed_loop_trip_update(position_mm))
+      {
+         rx->target_current = 0;
+         rx->controlword = CTRL_DISABLE_VOLT;
+         /* Send it now: after the loop come printouts and SDO diagnostics, during which the
+          * drive would otherwise keep applying the last commanded current. */
+         fieldbus_roundtrip(fieldbus);
+         log_fault(fieldbus, elapsed_s, FAULT_POSITION_LIMIT, (uint32_t)POS_TRIP_CYCLES,
+                   RECOVERY_SHUTDOWN_INITIATED);
+         fault_detected = TRUE;
+         pos_trip_detected = TRUE;
+         pos_trip_position_mm = position_mm;
+         break;
+      }
+
+      /* Filters and controller (closed_loop_position.c); the output is sent in the next cycle */
+      pid = closed_loop_step(elapsed_s, position_mm, target_current_A);
+      next_current_A = pid.output_A;
+#endif
+
       /* Measure cycle timing jitter (actual time vs. scheduled deadline) before logging the
        * sample, so it's captured in the same row instead of being printed live. */
       clock_gettime(CLOCK_MONOTONIC, &now);
@@ -414,7 +235,11 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       }
 
       /* Log sample */
-      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us);
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us, &pid);
+#else
+      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us, NULL);
+#endif
 
       /* Wait for next cycle using absolute-time sleep */
       if (cycle_jitter_us <= 0.0)
@@ -436,6 +261,14 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       printf("ERROR: Drive dropped out of OPERATION_ENABLED state (0x%04X), initiating shutdown\n",
              state_drift_statusword);
    }
+#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+   if (pos_trip_detected)
+   {
+      printf("ERROR: POSITION TRIP at t = %.3f s: position %+.3f mm outside %.1f .. %.1f mm for %d cycles, "
+             "0 A and voltage disabled\n",
+             elapsed_s, pos_trip_position_mm, POS_TRIP_MIN_MM, POS_TRIP_MAX_MM, POS_TRIP_CYCLES);
+   }
+#endif
    printf("Cyclic loop finished. Samples: %d, Faults: %d, missed deadlines: %d "
           "(max jitter %.1f us, max PDO exchange %.1f us)\n",
           fieldbus->sample_count, fieldbus->fault_count, missed_deadline_count,

@@ -39,7 +39,7 @@ Both notebooks load logs through `vca_log.load_log(path)`. It returns a `VcaLog`
 
 | What | Where |
 |---|---|
-| Idle window length | `BIAS_IDLE_S` in `main.h` |
+| Idle window length | `BIAS_IDLE_S` in `run_settings.h` |
 | 0 A setpoint during the window | `fieldbus_run_cyclic()` in `control_loop.c` |
 | Bias calculation and CSV column | `compute_ai2_bias_V()` and `export_csv()` in `logging.c` |
 | Loading both log formats | `vca_log.py` |
