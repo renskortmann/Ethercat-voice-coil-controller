@@ -15,6 +15,7 @@
 # System identification split: test/ and train/ hold copies of whole runs
 !/data/test/
 !/data/train/
+!/data/V2/
 /gcsc_data/*
 !/gcsc_data/.gitkeep
 !/gcsc_data/voice_coil_faults_chirp_6.0A_1.0to55.0Hz_120.0s_20261002_094200.csv
