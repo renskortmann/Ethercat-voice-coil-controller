@@ -7,7 +7,7 @@
 #include "closed_loop_position.h"
 #include "vca_model.h"
 
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID && POS_CONTROLLER == POS_CONTROLLER_SMC
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP && POS_CONTROLLER == POS_CONTROLLER_SMC
 
 _Static_assert((int)(SMC_A_FREQ_FACTOR * 1e6) > 0 && (int)(SMC_STEPS_FREQ_HZ * 1e6) > 0 &&
                (int)(SMC_LAYER_MM * 1e6) > 0 && (int)(SMC_ETA_SIGMAS * 1e6) >= 0,
@@ -51,10 +51,10 @@ controller_setup(double kp_amps)
 
 /** \brief One SMC update on the predicted state at the time the output acts:
  *  z1 = x - r, z2 = v - r', s = a z1 + z2, i = (r'' - a z2 - f(x, v) - eta sat(s / phi)) / g(x),
- *  with f = vca_acc(x, v, 0) and g = vca_gain(x). Logged: p_A = equivalent control (r'' - a z2 - f) / g,
- *  i_A = switching term -eta sat(s / phi) / g. A non-finite input or result gives 0 A.
+ *  with f = vca_acc(x, v, 0) and g = vca_gain(x). Logged: p_eq_A = equivalent control (r'' - a z2 - f) / g,
+ *  i_sw_A = switching term -eta sat(s / phi) / g. A non-finite input or result gives 0 A.
  */
-pid_log_t
+pos_ctrl_log_t
 controller_update(const pos_ctrl_in_t *in)
 {
    double x = in->x_pred_mm * 1e-3, v = in->v_pred_mm_s * 1e-3;
@@ -63,7 +63,7 @@ controller_update(const pos_ctrl_in_t *in)
    if (!isfinite(x) || !isfinite(v) || !isfinite(r) || !isfinite(rd) || !isfinite(rdd) || !(g > 0.0))
    {
       /* Cannot happen inside the trip window (g > 0 for |x| < Gamma / Gamma1, about 56 mm). */
-      return (pid_log_t){ .position_ref_mm = in->r_mm, .p_A = NAN, .i_A = NAN, .output_A = 0.0 };
+      return (pos_ctrl_log_t){ .position_ref_mm = in->r_mm, .p_eq_A = NAN, .i_sw_A = NAN, .output_A = 0.0 };
    }
    double z1 = x - r, z2 = v - rd;
    double s = smc_a * z1 + z2;
@@ -74,7 +74,7 @@ controller_update(const pos_ctrl_in_t *in)
    {
       u_A = 0.0;
    }
-   return (pid_log_t){ .position_ref_mm = in->r_mm, .p_A = eq_A, .i_A = sw_A, .output_A = u_A };
+   return (pos_ctrl_log_t){ .position_ref_mm = in->r_mm, .p_eq_A = eq_A, .i_sw_A = sw_A, .output_A = u_A };
 }
 
 #endif

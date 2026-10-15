@@ -95,16 +95,16 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    boolean state_drift_detected = FALSE;
    int missed_deadline_count = 0;
    double max_jitter_us = 0.0;
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP
    double next_current_A = 0.0;   /* controller output from the previous cycle's measurement; 0 A until the first update */
-   pid_log_t pid;                 /* this cycle's controller values, for the log */
+   pos_ctrl_log_t ctrl;           /* this cycle's controller values, for the log */
    double position_mm;            /* raw, used by the trip check */
    boolean pos_trip_detected = FALSE;
    double pos_trip_position_mm = 0.0;
 #endif
 
    /* Print the experiment and check its settings (closed_loop_position.c / open_loop_current.c) */
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP
    if (!closed_loop_setup(fieldbus->kp_amps))
 #else
    if (!open_loop_setup(fieldbus->kp_amps))
@@ -112,6 +112,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    {
       return FALSE;
    }
+   printf("Magnet gap g0 = %.1f mm (MAGNET_GAP_MM)\n", MAGNET_GAP_MM);
    printf("Bias window: %.1f s at 0 A before the experiment (t < 0) to measure the accelerometer offset\n",
           BIAS_IDLE_S);
    printf("Starting %.0f-second cyclic loop (%.0f s idle + %.0f s experiment)... expected WKC: %d\n",
@@ -134,7 +135,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       /* Bias idle window (t < 0): hold 0 A with the drive enabled, so the accelerometer offset is
        * measured in the same electrical conditions as the run. The experiment functions only ever
        * see t >= 0 (PRBS derives its bit index from elapsed_s and assumes it is non-negative). */
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP
       /* Closed loop: send the controller output computed at the end of the previous cycle from the
        * position received then. The controller runs right after the exchange below, so measurement,
        * trip check, controller and log row all use the same received position. */
@@ -196,7 +197,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          break;
       }
 
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP
       /* Raw position from this cycle's exchange. The trip checks it unfiltered over the whole run,
        * idle window included: a laser fault (signal lost reads about +29 mm) or a shaft outside the
        * window stops the run. */
@@ -217,8 +218,8 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       }
 
       /* Filters and controller (closed_loop_position.c); the output is sent in the next cycle */
-      pid = closed_loop_step(elapsed_s, position_mm, target_current_A);
-      next_current_A = pid.output_A;
+      ctrl = closed_loop_step(elapsed_s, position_mm, target_current_A);
+      next_current_A = ctrl.output_A;
 #endif
 
       /* Measure cycle timing jitter (actual time vs. scheduled deadline) before logging the
@@ -235,8 +236,8 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       }
 
       /* Log sample */
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
-      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us, &pid);
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP
+      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us, &ctrl);
 #else
       log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us, NULL);
 #endif
@@ -261,7 +262,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       printf("ERROR: Drive dropped out of OPERATION_ENABLED state (0x%04X), initiating shutdown\n",
              state_drift_statusword);
    }
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP
    if (pos_trip_detected)
    {
       printf("ERROR: POSITION TRIP at t = %.3f s: position %+.3f mm outside %.1f .. %.1f mm for %d cycles, "

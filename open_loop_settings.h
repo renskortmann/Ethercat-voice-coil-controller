@@ -10,8 +10,8 @@
 
 /* ---- EXPERIMENT_SINE ------------------------------------------------------------------------- */
 /** \brief Feedforward sine experiment parameters (EXPERIMENT_SINE) */
-#define SINE_FREQ_HZ        15.0 /**< Target current waveform frequency in Hz */
-#define SINE_AMPLITUDE_A    5.0  /**< Target current waveform amplitude in Amps */
+#define SINE_FREQ_HZ        10.0 /**< Target current waveform frequency in Hz */
+#define SINE_AMPLITUDE_A    3.0  /**< Target current waveform amplitude in Amps */
 
 
 /* ---- EXPERIMENT_STEP_RELEASE ----------------------------------------------------------------- */
@@ -25,8 +25,8 @@
 /** \brief Chirp experiment parameters (EXPERIMENT_CHIRP). Instantaneous frequency is
  *  f(t) = CHIRP_F0_HZ * (CHIRP_F1_HZ / CHIRP_F0_HZ)^(t / CHIRP_DURATION_S), so every decade
  *  gets the same sweep time. After CHIRP_DURATION_S the current is 0 A for the rest of the run. */
-#define CHIRP_AMPLITUDE_A   6.0   /**< Current amplitude in Amps */
-#define CHIRP_F0_HZ         10.0   /**< Start frequency in Hz (> 0) */
+#define CHIRP_AMPLITUDE_A   7.0   /**< Current amplitude in Amps */
+#define CHIRP_F0_HZ         5.0   /**< Start frequency in Hz (> 0) */
 #define CHIRP_F1_HZ         55.0 /**< End frequency in Hz */
 #define CHIRP_DURATION_S    120.0   /**< Sweep length in seconds, <= RUN_DURATION_S */
 
@@ -38,7 +38,7 @@
  *  each ramp must end before the next breakpoint and the last breakpoint must be < CHIRP_DURATION_S.
  *  Checked at startup, which also rejects amplitudes above the drive peak current.
  *  Write the numbers with a decimal point (6.0, not 6): they are copied verbatim into the file name. */
-#define CHIRP_SCHED(X)      X(0.0, 3.0) X(30.0, 7.0) X(60.0, 14.0)
+#define CHIRP_SCHED(X)      X(0.0, 5.0) X(30.0, 10.0) X(60.0, 15.0) X(90.0, 25.0)
 #define CHIRP_SCHED_RAMP_S  30.0       /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
 
 

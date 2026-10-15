@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Position-control reference and tracking plots (EXPERIMENT_POSITION_PID).
+"""Position-control reference and tracking plots (EXPERIMENT_CLOSED_LOOP).
 
 Two uses:
 
@@ -183,9 +183,9 @@ def reference_mm(cfg: dict, t: float) -> float:
 
 def describe(cfg: dict) -> str:
     lines = []
-    if cfg["mode"] != "EXPERIMENT_POSITION_PID":
+    if cfg["mode"] != "EXPERIMENT_CLOSED_LOOP":
         lines.append(f"NOTE: EXPERIMENT_MODE is {cfg['mode']}, so this reference is NOT used until it is "
-                     "set to EXPERIMENT_POSITION_PID")
+                     "set to EXPERIMENT_CLOSED_LOOP")
     if cfg["controller"] == "SMC":
         f_chirp = max(cfg["chirp_f0_hz"], cfg["chirp_f1_hz"])
         f_max = {"chirp": f_chirp, "chirp_hold": f_chirp, "sine": cfg["sine_freq_hz"]}.get(
@@ -289,7 +289,7 @@ def preview(cfg: dict) -> None:
     plt.show()
 
 
-# Trace labels per controller: what the logged pid_p_A / pid_i_A / pid_output_A mean
+# Trace labels per controller: what the logged ctrl_p_eq_A / ctrl_i_sw_A / ctrl_output_A mean
 CONTROLLER_LABELS = {
     "PI": {"out": "PI output u (sent next cycle)", "p": "P term  Kp e", "i": "I term  integrator"},
     "SMC": {"out": "SMC output u (sent next cycle)", "p": "equivalent control  (r'' - a z2 - f) / g",
@@ -345,7 +345,14 @@ def describe_run(path: str) -> tuple[str, str, str]:
     filters = ([ekf] if kf else []) + [f"notch {f} Hz" for f in notches] + \
         [f"output notch {f} Hz Q{q}" for f, q in out_notches]
     parts.append(" + ".join(filters) if filters else "no position filter")
+    gap = re.search(r"_gap([\d.]+)mm", tag)   # logs before the gap tag were all at 22.3 mm
+    if gap:
+        parts.append(f"gap {gap[1]} mm")
     return ctrl, f"{ctrl}: " + " | ".join(parts), filtered_label(ctrl, kf, notches, delay)
+
+
+# Column names in logs written before the controller columns were renamed
+OLD_COLUMN_NAMES = {"ctrl_p_eq_A": "pid_p_A", "ctrl_i_sw_A": "pid_i_A", "ctrl_output_A": "pid_output_A"}
 
 
 def read_columns(path: str, names: list[str]) -> tuple[list[float], dict[str, list[float]]]:
@@ -355,6 +362,8 @@ def read_columns(path: str, names: list[str]) -> tuple[list[float], dict[str, li
     with open(path, newline="") as fh:
         reader = csv.DictReader(fh)
         reader.fieldnames = [f.strip() for f in (reader.fieldnames or [])]
+        old_to_new = {v: k for k, v in OLD_COLUMN_NAMES.items()}
+        reader.fieldnames = [old_to_new.get(f, f) for f in reader.fieldnames]
         for row in reader:
             try:
                 time_s.append(float(row["time_s"]))
@@ -497,13 +506,13 @@ def kf_diagnostics(path: str, t: list[float], c: dict) -> None:
 
 
 def tracking(cfg: dict, path: str, show_kf: bool = False, show_chirp: bool = False) -> None:
-    names = ["position_mm", "position_ref_mm", "pid_p_A", "pid_i_A", "pid_output_A", "actual_current_A",
+    names = ["position_mm", "position_ref_mm", "ctrl_p_eq_A", "ctrl_i_sw_A", "ctrl_output_A", "actual_current_A",
              "position_filt_mm", "kf_innovation_mm", "kf_innov_std_mm", "power_W", "energy_J", "kf_pickup_mm"]
     t, c = read_columns(path, names)
     if not t:
         sys.exit(f"no usable rows in {path}")
     ctrl, run_desc, filt_label = describe_run(path)
-    lab = CONTROLLER_LABELS.get(ctrl, {"out": f"{ctrl} output u (sent next cycle)", "p": "pid_p_A", "i": "pid_i_A"})
+    lab = CONTROLLER_LABELS.get(ctrl, {"out": f"{ctrl} output u (sent next cycle)", "p": "ctrl_p_eq_A", "i": "ctrl_i_sw_A"})
     print(run_desc)
     y = c["position_mm"]
     r = c["position_ref_mm"]
@@ -534,7 +543,7 @@ def tracking(cfg: dict, path: str, show_kf: bool = False, show_chirp: bool = Fal
         rms = math.sqrt(sum(err[i] ** 2 for i in run) / len(run))
         print(f"tracking error ({err_label}), t >= 0: rms {rms:.3f} mm, "
               f"max |e| {max(abs(err[i]) for i in run):.3f} mm")
-    u = [v for v in c["pid_output_A"] if math.isfinite(v)]
+    u = [v for v in c["ctrl_output_A"] if math.isfinite(v)]
     if u:
         n_lim = sum(abs(v) >= cfg["output_limit_a"] - 1e-9 for v in u)
         print(f"{ctrl} output: max |u| {max(abs(v) for v in u):.3f} A, RMS {math.sqrt(sum(v * v for v in u) / len(u)):.3f} A, "
@@ -581,11 +590,11 @@ def tracking(cfg: dict, path: str, show_kf: bool = False, show_chirp: bool = Fal
     ax_err.set_xlabel("time_s (s)")
 
     # Drawn back to front, so a busy term (e.g. the SMC switching term) does not hide the output
-    ax_cur.plot(t, c["pid_i_A"], color="tab:orange", lw=0.6, alpha=0.5, label=lab["i"])
+    ax_cur.plot(t, c["ctrl_i_sw_A"], color="tab:orange", lw=0.6, alpha=0.5, label=lab["i"])
     ax_cur.plot(t, c["actual_current_A"], color="tab:blue", lw=0.8, alpha=0.6, label="actual current")
-    ax_cur.plot(t, c["pid_output_A"], color="tab:purple", lw=1.0, label=lab["out"])
+    ax_cur.plot(t, c["ctrl_output_A"], color="tab:purple", lw=1.0, label=lab["out"])
     if ctrl != "SMC":  # the SMC's equivalent control swamps the axis; its output and switching term are enough
-        ax_cur.plot(t, c["pid_p_A"], color="tab:green", lw=1.0, label=lab["p"])
+        ax_cur.plot(t, c["ctrl_p_eq_A"], color="tab:green", lw=1.0, label=lab["p"])
     ax_cur.set_ylabel("current (A)")
     ax_cur.legend(loc="upper right", fontsize="small", ncol=2)
 

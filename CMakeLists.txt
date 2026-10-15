@@ -52,7 +52,8 @@ add_executable(ethercat-voice-coil-controller
    notch.c
    vca_ekf.c
    diagnostics.c
-   logging.c)
+   logging.c
+   live_view.c)
 
 target_link_libraries(ethercat-voice-coil-controller PRIVATE
    soem

@@ -7,7 +7,7 @@ POS_KF_DELAY_CYCLES offline.
 With no path the newest log in gcsc_data/ is used. The filter is a line-by-line port of vca_ekf_step()
 in vca_ekf.c (Method C model from vca_model.h, POS_KF_SIG_* from closed_loop_settings.h), run on the raw
 position_mm at 2 kHz. Its input for the step k-1 -> k is the current sent in cycle k-1-D; the firmware
-today uses D = 0. The current sent in cycle k is pid_output_A of row k-1 (control_loop.c sends the
+today uses D = 0. The current sent in cycle k is ctrl_output_A of row k-1 (control_loop.c sends the
 previous cycle's output).
 
 Check: with D = 0 the replayed innovation must equal the logged kf_innovation_mm (printed as the
@@ -43,7 +43,9 @@ def defines(*names: str) -> dict[str, str]:
 
 
 def model() -> dict[str, float]:
-    d = defines("vca_model.h", "closed_loop_settings.h")
+    d = defines("vca_model.h", "closed_loop_settings.h", "run_settings.h")
+    if "MAGNET_GAP_MM" in d:   # VCA_GAP_M is an expression of MAGNET_GAP_MM (run_settings.h)
+        d["VCA_GAP_M"] = str(float(d["MAGNET_GAP_MM"]) * 1e-3)
     keys = ["VCA_MASS_KG", "VCA_GAMMA_N_PER_A", "VCA_GAMMA1_N_PER_AM", "VCA_DAMPING_NS_PER_M", "VCA_C_R_NM3",
             "VCA_C_L_NM3", "VCA_GAP_M", "POS_KF_SIG_A_M_S2", "POS_KF_SIG_Y_MM", "POS_KF_MAINS_ENABLE",
             "POS_KF_MAINS_PICKUP_MM"]
@@ -136,7 +138,8 @@ def main() -> None:
     p = model()
     a = np.genfromtxt(path, delimiter=",", names=True, autostrip=True)
     t, y = a["time_s"], a["position_mm"]
-    out = np.nan_to_num(a["pid_output_A"], nan=0.0)        # 0 A in the idle window
+    out_col = "ctrl_output_A" if "ctrl_output_A" in a.dtype.names else "pid_output_A"  # older logs
+    out = np.nan_to_num(a[out_col], nan=0.0)                # 0 A in the idle window
     sent = np.concatenate(([0.0], out[:-1]))                # sent in cycle k: output of row k-1
     print(os.path.basename(path))
     print(f"model: m {p['VCA_MASS_KG']} kg, Gamma {p['VCA_GAMMA_N_PER_A']} N/A; "

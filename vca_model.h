@@ -4,10 +4,14 @@
  * m a = (Gamma + Gamma1 x) i - c v - (C_R / (g0 - x)^3 - C_L / (g0 + x)^3), SI units.
  * Not a per-run setting: replace the values only after a new fit (printed by the notebook's
  * Method C cell). Used by the position EKF (vca_ekf.c) and the sliding-mode controller (controller_smc.c).
+ * The gap g0 (VCA_GAP_M) is a rig setting in run_settings.h (MAGNET_GAP_MM). The values below were fitted
+ * at g0 = 22.3 mm; at another gap the C_R / C_L terms are extrapolated with the 1 / g^3 law, so refit there.
  */
 
 #ifndef VCA_MODEL_H
 #define VCA_MODEL_H
+
+#include "run_settings.h"   /* VCA_GAP_M */
 
 #define VCA_MASS_KG          51.5     /**< Moving mass m, kg */
 #define VCA_GAMMA_N_PER_A    200.9    /**< Motor constant at the centre Gamma, N/A */
@@ -15,7 +19,6 @@
 #define VCA_DAMPING_NS_PER_M 1586.3   /**< Viscous friction c, N s/m */
 #define VCA_C_R_NM3          0.001604 /**< Right magnet strength C_R, N m^3 */
 #define VCA_C_L_NM3          0.001574 /**< Left magnet strength C_L, N m^3 */
-#define VCA_GAP_M            22.3e-3  /**< Magnet gap g0, m */
 
 /** \brief Method C acceleration in m/s^2: ((Gamma + Gamma1 x) i - c v - (C_R / (g0 - x)^3 - C_L / (g0 + x)^3)) / m
  *  \param x Position in m, \param v Velocity in m/s, \param u Current in A */

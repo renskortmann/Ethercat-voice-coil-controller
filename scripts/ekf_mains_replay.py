@@ -266,7 +266,8 @@ def main() -> None:
     cfg = ref_track.read_settings()
     a = np.genfromtxt(path, delimiter=",", names=True, autostrip=True)
     t, y = a["time_s"], a["position_mm"]
-    out_logged = np.nan_to_num(a["pid_output_A"], nan=0.0)
+    out_col = "ctrl_output_A" if "ctrl_output_A" in a.dtype.names else "pid_output_A"  # older logs
+    out_logged = np.nan_to_num(a[out_col], nan=0.0)
     sent = np.concatenate(([0.0], out_logged[:-1]))            # sent in cycle k: output of row k-1
     idle = (t < 0) & (t > t[0] + 0.5)
     hold = (t >= args.hold[0]) & (t < args.hold[1])

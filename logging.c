@@ -5,6 +5,10 @@
 #include "main.h"
 #include "open_loop_current.h"     /* EXPERIMENT_TAG for the current experiments */
 #include "closed_loop_position.h"  /* EXPERIMENT_TAG for position control */
+#include "live_view.h"
+
+/** \brief File-name tag: EXPERIMENT_TAG plus the magnet gap (MAGNET_GAP_MM, run_settings.h), e.g. "..._gap10.0mm" */
+#define LOG_TAG EXPERIMENT_TAG "_gap" STRINGIFY(MAGNET_GAP_MM) "mm"
 
 /** \brief Record one timestamped sample to the in-memory sample buffer
  *  Converts currents from raw values to physical Amps using KP scaling, the analog input
@@ -17,12 +21,12 @@
  *  \param tx Pointer to received TxPDO data
  *  \param cycle_jitter_us Signed offset between actual and scheduled cycle time (positive = late)
  *  \param pdo_exchange_us Time spent in send + receive processdata this cycle (frame round-trip)
- *  \param pid Position controller values for this cycle, or NULL outside a position-control run
- *         (the PID columns are then nan)
+ *  \param ctrl Position controller values for this cycle, or NULL outside a position-control run
+ *         (the controller columns are then nan)
  */
 void
 log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
-           double cycle_jitter_us, double pdo_exchange_us, const pid_log_t *pid)
+           double cycle_jitter_us, double pdo_exchange_us, const pos_ctrl_log_t *ctrl)
 {
    if (fieldbus->sample_count < MAX_SAMPLES)
    {
@@ -38,6 +42,7 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
       double ai2_value_V = tx->ai2_value / DAI_SCALE;
       /* Laser distance (mm) from the AI1 voltage, re-referenced to the rest position (see main.h). */
       double position_mm = ai1_raw_to_position_mm(tx->ai1_value);
+      live_view_push(timestamp_s, position_mm, ctrl ? ctrl->position_filt_mm : NAN, actual_current_A);
       /* DV1 units (Appendix A, Table A.1): volts = raw * 1.05 * K_OV / 2^14 */
       double dc_bus_voltage_V = tx->dc_bus_voltage_raw * 1.05 * fieldbus->kov_volts / DV1_BASE;
 
@@ -67,15 +72,15 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
       fieldbus->samples[fieldbus->sample_count].cycle_jitter_us = cycle_jitter_us;
       fieldbus->samples[fieldbus->sample_count].pdo_exchange_us = pdo_exchange_us;
       fieldbus->samples[fieldbus->sample_count].position_mm = position_mm;
-      fieldbus->samples[fieldbus->sample_count].position_ref_mm = pid ? pid->position_ref_mm : NAN;
-      fieldbus->samples[fieldbus->sample_count].pid_p_A = pid ? pid->p_A : NAN;
-      fieldbus->samples[fieldbus->sample_count].pid_i_A = pid ? pid->i_A : NAN;
-      fieldbus->samples[fieldbus->sample_count].pid_output_A = pid ? pid->output_A : NAN;
-      fieldbus->samples[fieldbus->sample_count].position_filt_mm = pid ? pid->position_filt_mm : NAN;
-      fieldbus->samples[fieldbus->sample_count].kf_velocity_mm_s = pid ? pid->kf_velocity_mm_s : NAN;
-      fieldbus->samples[fieldbus->sample_count].kf_innovation_mm = pid ? pid->kf_innovation_mm : NAN;
-      fieldbus->samples[fieldbus->sample_count].kf_innov_std_mm = pid ? pid->kf_innov_std_mm : NAN;
-      fieldbus->samples[fieldbus->sample_count].kf_pickup_mm = pid ? pid->kf_pickup_mm : NAN;
+      fieldbus->samples[fieldbus->sample_count].position_ref_mm = ctrl ? ctrl->position_ref_mm : NAN;
+      fieldbus->samples[fieldbus->sample_count].ctrl_p_eq_A = ctrl ? ctrl->p_eq_A : NAN;
+      fieldbus->samples[fieldbus->sample_count].ctrl_i_sw_A = ctrl ? ctrl->i_sw_A : NAN;
+      fieldbus->samples[fieldbus->sample_count].ctrl_output_A = ctrl ? ctrl->output_A : NAN;
+      fieldbus->samples[fieldbus->sample_count].position_filt_mm = ctrl ? ctrl->position_filt_mm : NAN;
+      fieldbus->samples[fieldbus->sample_count].kf_velocity_mm_s = ctrl ? ctrl->kf_velocity_mm_s : NAN;
+      fieldbus->samples[fieldbus->sample_count].kf_innovation_mm = ctrl ? ctrl->kf_innovation_mm : NAN;
+      fieldbus->samples[fieldbus->sample_count].kf_innov_std_mm = ctrl ? ctrl->kf_innov_std_mm : NAN;
+      fieldbus->samples[fieldbus->sample_count].kf_pickup_mm = ctrl ? ctrl->kf_pickup_mm : NAN;
       fieldbus->sample_count++;
    }
 }
@@ -144,16 +149,16 @@ compute_ai2_bias_V(const Fieldbus *fieldbus)
 }
 
 /** \brief Write sample and fault buffers to CSV files in CSV_DIR, and print fault events
- *  File names carry the compile-time experiment tag (EXPERIMENT_TAG: mode + parameters) followed
- *  by a wall-clock timestamp, so a directory listing shows what each run was. Creates two files:
- *    - voice_coil_log_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ..., position_mm, ai2_corrected_V, position_ref_mm, pid_p_A, pid_i_A, pid_output_A, position_filt_mm,
+ *  File names carry the compile-time experiment tag (LOG_TAG: EXPERIMENT_TAG = mode + parameters, then
+ *  _gap<MAGNET_GAP_MM>mm) followed by a wall-clock timestamp, so a directory listing shows what each run was. Creates two files:
+ *    - voice_coil_log_<LOG_TAG>_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ..., position_mm, ai2_corrected_V, position_ref_mm, ctrl_p_eq_A, ctrl_i_sw_A, ctrl_output_A, position_filt_mm,
  *      kf_velocity_mm_s, kf_innovation_mm, kf_innov_std_mm, kf_pickup_mm)
  *      scripts/benchmark-rt.sh reads cycle_jitter_us and pdo_exchange_us by column number (10 and 11),
  *      so new columns must be appended, not inserted.
  *      Rows with time_s < 0 are the 0 A bias idle window (BIAS_IDLE_S). ai2_corrected_V is
  *      ai2_value_V minus its mean over that window; the bias itself is ai2_value_V - ai2_corrected_V.
- *    - voice_coil_faults_<EXPERIMENT_TAG>_YYYYMMDD_HHMMSS.csv: fault events (timestamp, type, detail, action)
- *  e.g. voice_coil_log_step_release_hold6.0A_ramp0.2s_dur3.0s_20260923_131834.csv
+ *    - voice_coil_faults_<LOG_TAG>_YYYYMMDD_HHMMSS.csv: fault events (timestamp, type, detail, action)
+ *  e.g. voice_coil_log_step_release_hold6.0A_ramp0.2s_dur3.0s_gap10.0mm_20260923_131834.csv
  *  Also prints each fault event to console (deferred from log_fault(), which cannot block on I/O
  *  since it runs inside the real-time cyclic loop).
  *  \param fieldbus Fieldbus context with populated buffers
@@ -177,11 +182,11 @@ export_csv(Fieldbus *fieldbus)
    mkdir(CSV_DIR, 0755);
 
    /* Write sample log */
-   snprintf(sample_file, sizeof(sample_file), "%s/voice_coil_log_%s_%s.csv", CSV_DIR, EXPERIMENT_TAG, timestamp);
+   snprintf(sample_file, sizeof(sample_file), "%s/voice_coil_log_%s_%s.csv", CSV_DIR, LOG_TAG, timestamp);
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm,ai2_corrected_V,position_ref_mm,pid_p_A,pid_i_A,pid_output_A,position_filt_mm,kf_velocity_mm_s,kf_innovation_mm,kf_innov_std_mm,kf_pickup_mm\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us,position_mm,ai2_corrected_V,position_ref_mm,ctrl_p_eq_A,ctrl_i_sw_A,ctrl_output_A,position_filt_mm,kf_velocity_mm_s,kf_innovation_mm,kf_innov_std_mm,kf_pickup_mm\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
          fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f,%.4f,%.6f,%.4f,%.6f,%.6f,%.6f,%.4f,%.4f,%.6f,%.6f,%.6f\n",
@@ -199,9 +204,9 @@ export_csv(Fieldbus *fieldbus)
                  fieldbus->samples[i].position_mm,
                  fieldbus->samples[i].ai2_value_V - ai2_bias_V,
                  fieldbus->samples[i].position_ref_mm,
-                 fieldbus->samples[i].pid_p_A,
-                 fieldbus->samples[i].pid_i_A,
-                 fieldbus->samples[i].pid_output_A,
+                 fieldbus->samples[i].ctrl_p_eq_A,
+                 fieldbus->samples[i].ctrl_i_sw_A,
+                 fieldbus->samples[i].ctrl_output_A,
                  fieldbus->samples[i].position_filt_mm,
                  fieldbus->samples[i].kf_velocity_mm_s,
                  fieldbus->samples[i].kf_innovation_mm,
@@ -222,7 +227,7 @@ export_csv(Fieldbus *fieldbus)
                                 "POSITION_LIMIT"};
    const char *recovery_names[] = {"NONE", "AUTO_RECOVER", "SHUTDOWN_INITIATED"};
 
-   snprintf(fault_file, sizeof(fault_file), "%s/voice_coil_faults_%s_%s.csv", CSV_DIR, EXPERIMENT_TAG, timestamp);
+   snprintf(fault_file, sizeof(fault_file), "%s/voice_coil_faults_%s_%s.csv", CSV_DIR, LOG_TAG, timestamp);
    fp = fopen(fault_file, "w");
    if (fp)
    {

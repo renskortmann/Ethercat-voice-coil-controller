@@ -41,7 +41,7 @@ boolean controller_setup(double kp_amps);
  *  \return position_ref_mm, p_A, i_A (the controller's own terms, or NaN if it has none) and
  *          output_A, which is sent to the drive in the next cycle
  */
-pid_log_t controller_update(const pos_ctrl_in_t *in);
+pos_ctrl_log_t controller_update(const pos_ctrl_in_t *in);
 
 /** \brief Clamp x to [-limit, limit] (NaN passes through; callers check isfinite) */
 static inline double

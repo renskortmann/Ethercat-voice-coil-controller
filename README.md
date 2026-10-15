@@ -78,7 +78,7 @@ split by what they control:
 |---|---|
 | [run_settings.h](run_settings.h) | `EXPERIMENT_MODE` (which experiment), `RUN_DURATION_S`, `BIAS_IDLE_S` |
 | [open_loop_settings.h](open_loop_settings.h) | Current-waveform experiments: one section each for sine, step-release, chirp, scheduled chirp, sine blocks, PRBS |
-| [closed_loop_settings.h](closed_loop_settings.h) | Position control (`EXPERIMENT_POSITION_PID`): reference, controller and gains, position filters, safety limits; see [docs/position-control.md](docs/position-control.md) |
+| [closed_loop_settings.h](closed_loop_settings.h) | Position control (`EXPERIMENT_CLOSED_LOOP`): reference, controller and gains, position filters, safety limits; see [docs/position-control.md](docs/position-control.md) |
 | [vca_model.h](vca_model.h) | Fitted plant model used by the position EKF (only after a new fit) |
 | [main.h](main.h) | `CYCLE_TIME_MS`, `RT_CPU_CORE`, AI1 laser calibration, and the fieldbus definitions |
 
@@ -122,7 +122,7 @@ Four experiments are available, selected at compile time with `EXPERIMENT_MODE`:
   each bit held for `PRBS_HOLD_CYCLES` cycles. The spectrum is flat up to about
   `PRBS_BANDWIDTH_HZ` (sinc² roll-off, about 2 dB down at the band edge). The seed is fixed, so
   every run commands the same sequence. After `PRBS_DURATION_S` the current is 0 A.
-- `EXPERIMENT_POSITION_PID` — closed-loop position control: a PI controller on the laser
+- `EXPERIMENT_CLOSED_LOOP` — closed-loop position control: a PI controller on the laser
   position (AI1) makes `position_mm` follow a compile-time reference (steps or sine), with a
   position trip at ±10 mm. See [docs/position-control.md](docs/position-control.md).
 

@@ -9,6 +9,7 @@
  */
 
 #include "main.h"
+#include "live_view.h"
 
 /** \brief Main function for the voice-coil application
  * \param argc Number of command-line arguments
@@ -56,6 +57,7 @@ int main(int argc, char *argv[])
    }
    memset(fieldbus.samples, 0, MAX_SAMPLES * sizeof(sample_log_entry_t));
    memset(fieldbus.faults, 0, MAX_FAULTS * sizeof(fault_log_entry_t));
+   live_view_open();
 
    /* fieldbus_start() and cia402_bring_up() are the unbounded-duration, printf-heavy SDO
     * configuration and state-machine bring-up phases. They run at the default scheduling
@@ -128,6 +130,7 @@ int main(int argc, char *argv[])
       fieldbus_stop(&fieldbus);
    }
 
+   live_view_close();
    export_csv(&fieldbus);
 
    free(fieldbus.samples);

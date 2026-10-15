@@ -1,8 +1,8 @@
 /** \file closed_loop_settings.h
- * \brief SETTINGS: knobs for closed-loop position control (EXPERIMENT_POSITION_PID)
+ * \brief SETTINGS: knobs for closed-loop position control
  *
- * A controller on the AI1 laser position drives the coil current so position_mm follows a
- * compile-time reference. Sections run from "changed every run" to "almost never":
+ * A controller on the laser position drives the coil current so position_mm follows a
+ * predetermined reference. Sections run from "changed every run" to "almost never":
  *   1. Reference          what the shaft should follow
  *   2. Controller         which controller, and its gains
  *   3. Position filters   EKF and notches between the laser and the controller
@@ -29,12 +29,12 @@
  *  the previous value to position_mm over POS_REF_RAMP_S, then holds; the last value is held until
  *  RUN_DURATION_S. One entry gives a constant setpoint. The first entry must be at t = 0 (the starting
  *  reference, no ramp-in) and each ramp must end before the next breakpoint. */
-#define POS_REF_STEPS(X)    X(0.0, 0.0) X(5.0, 5.0) X(10.0, -2.0) X(20.0, 4.0) X(30.0, 0.0)
+#define POS_REF_STEPS(X)    X(0.0, 0.0) X(5.0, 1.0) X(10.0, -1.0) X(15.0, 2.0) X(20.0, 0.0)
 #define POS_REF_RAMP_S      0.0   /**< Ramp time at each breakpoint in seconds; 0 for a hard step */
 
 /** POS_REF_SHAPE_SINE */
 #define POS_REF_SINE_OFFSET_MM    0.0   /**< Sine reference centre, in mm */
-#define POS_REF_SINE_AMPLITUDE_MM 5.0   /**< Sine reference amplitude, in mm */
+#define POS_REF_SINE_AMPLITUDE_MM 2.0   /**< Sine reference amplitude, in mm */
 #define POS_REF_SINE_FREQ_HZ      1.0   /**< Sine reference frequency, in Hz */
 
 /** POS_REF_SHAPE_CHIRP: offset until POS_REF_CHIRP_START_S, then offset + amplitude * sin(phase) with the
@@ -135,8 +135,8 @@
 /* ---- 4. Safety limits ------------------------------------------------------------------------ */
 #define POS_REF_MIN_MM      -8.0  /**< Lowest reference allowed by the startup check, in mm */
 #define POS_REF_MAX_MM      8.0   /**< Highest reference allowed by the startup check, in mm */
-#define POS_TRIP_MIN_MM     -10.0 /**< Runtime trip: 0 A and shut down below this position, in mm */
-#define POS_TRIP_MAX_MM     10.0  /**< Runtime trip: 0 A and shut down above this position, in mm */
+#define POS_TRIP_MIN_MM     -9.0  /**< Runtime trip: 0 A and shut down below this position, in mm */
+#define POS_TRIP_MAX_MM     9.0   /**< Runtime trip: 0 A and shut down above this position, in mm */
 #define POS_TRIP_CYCLES     3     /**< Consecutive cycles outside the trip window before tripping (rejects single noise spikes) */
 
 #endif /* CLOSED_LOOP_SETTINGS_H */

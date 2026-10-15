@@ -188,9 +188,9 @@ typedef struct
    double pdo_exchange_us;   /**< Time spent in ecx_send_processdata + ecx_receive_processdata (frame round-trip) */
    double position_mm;       /**< Shaft displacement from centre in mm, derived from ai1_value_V (AI1_* calibration) */
    double position_ref_mm;   /**< Position reference in mm (nan outside a position-control run or during the idle window) */
-   double pid_p_A;           /**< PI: proportional term; SMC: equivalent (model) control; in Amps (nan outside a position-control run) */
-   double pid_i_A;           /**< PI: integrator; SMC: switching term -eta sat(s / phi) / g; in Amps (nan outside a position-control run) */
-   double pid_output_A;      /**< Saturated controller output in Amps, commanded in the NEXT cycle (nan outside a position-control run) */
+   double ctrl_p_eq_A;       /**< PI: proportional term; SMC: equivalent (model) control; in Amps (nan outside a position-control run) */
+   double ctrl_i_sw_A;       /**< PI: integrator; SMC: switching term -eta sat(s / phi) / g; in Amps (nan outside a position-control run) */
+   double ctrl_output_A;     /**< Saturated controller output in Amps, commanded in the NEXT cycle (nan outside a position-control run) */
    double position_filt_mm;  /**< Position after the filters: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE, not with the SMC) (nan outside a position-control run) */
    double kf_velocity_mm_s;  /**< EKF velocity estimate v(k|k) in mm/s (nan unless POS_KF_ENABLE) */
    double kf_innovation_mm;  /**< EKF innovation y(k) - x(k|k-1) in mm (nan unless POS_KF_ENABLE) */
@@ -202,15 +202,15 @@ typedef struct
 typedef struct
 {
    double position_ref_mm;   /**< Reference r_k in mm (nan during the idle window) */
-   double p_A;               /**< PI: Kp * e_k; SMC: equivalent (model) control; in Amps */
-   double i_A;               /**< PI: integrator after this cycle's update; SMC: switching term; in Amps */
+   double p_eq_A;            /**< PI: Kp * e_k; SMC: equivalent (model) control; in Amps */
+   double i_sw_A;            /**< PI: integrator after this cycle's update; SMC: switching term; in Amps */
    double output_A;          /**< Saturated controller output in Amps, sent to the drive in the next cycle */
    double position_filt_mm;  /**< Position after the filters: EKF x(k|k) (POS_KF_ENABLE) or raw, then notched (POS_NOTCH_ENABLE, not with the SMC) */
    double kf_velocity_mm_s;  /**< EKF velocity estimate v(k|k) in mm/s (nan unless POS_KF_ENABLE) */
    double kf_innovation_mm;  /**< EKF innovation y(k) - x(k|k-1) in mm (nan unless POS_KF_ENABLE) */
    double kf_innov_std_mm;   /**< EKF predicted innovation std sqrt(S) in mm (nan unless POS_KF_ENABLE) */
    double kf_pickup_mm;      /**< EKF mains pickup estimate on the laser in mm (nan unless POS_KF_MAINS_ENABLE) */
-} pid_log_t;
+} pos_ctrl_log_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
 typedef struct
@@ -240,7 +240,7 @@ boolean cia402_bring_up(Fieldbus *fieldbus);
 void add_timespec(struct timespec *ts, int64_t addus);
 boolean fieldbus_run_cyclic(Fieldbus *fieldbus);
 void log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
-                double cycle_jitter_us, double pdo_exchange_us, const pid_log_t *pid);
+                double cycle_jitter_us, double pdo_exchange_us, const pos_ctrl_log_t *ctrl);
 void log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
                uint32_t fault_detail, recovery_action_t recovery_action);
 void read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s);

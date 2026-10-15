@@ -10,7 +10,7 @@
 #include "vca_model.h"
 #include "waveforms.h"
 
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP
 
 #define MS_(x)  ((int)((x) * 1000))   /* seconds/mm/Hz -> integer thousandths, for _Static_assert */
 
@@ -213,12 +213,12 @@ pos_ref_check(double kp_amps)
 {
    if (!(kp_amps > 0.0))
    {
-      printf("POSITION PID: drive peak current KP not read (%.1f A); refusing to run\n", kp_amps);
+      printf("POSITION: drive peak current KP not read (%.1f A); refusing to run\n", kp_amps);
       return FALSE;
    }
    if (OUTPUT_LIMIT_A >= kp_amps)
    {
-      printf("POSITION PID: OUTPUT_LIMIT_A %.2f A is not below the drive peak current %.1f A\n",
+      printf("POSITION: OUTPUT_LIMIT_A %.2f A is not below the drive peak current %.1f A\n",
              OUTPUT_LIMIT_A, kp_amps);
       return FALSE;
    }
@@ -405,11 +405,11 @@ closed_loop_trip_update(double position_mm)
  *  \param sent_current_A Current sent this cycle: acts over the step to the next measurement
  *  \return This cycle's values for the log; output_A is the current to send in the NEXT cycle
  */
-pid_log_t
+pos_ctrl_log_t
 closed_loop_step(double t_s, double position_mm, double sent_current_A)
 {
    double position_filt_mm;
-   pid_log_t pid;
+   pos_ctrl_log_t ctrl;
    pos_ctrl_in_t in = { .x_pred_mm = NAN, .v_pred_mm_s = NAN };
 #if POS_KF_ENABLE
    /* Step k-1 -> k with the current sent in cycle k-1-D, then replace it by this cycle's */
@@ -438,7 +438,7 @@ closed_loop_step(double t_s, double position_mm, double sent_current_A)
    if (t_s < 0.0)
    {
       /* Bias idle window: controller off, 0 A, controller state untouched. */
-      pid = (pid_log_t){ .position_ref_mm = NAN, .p_A = 0.0, .i_A = 0.0, .output_A = 0.0 };
+      ctrl = (pos_ctrl_log_t){ .position_ref_mm = NAN, .p_eq_A = 0.0, .i_sw_A = 0.0, .output_A = 0.0 };
    }
    else
    {
@@ -448,27 +448,27 @@ closed_loop_step(double t_s, double position_mm, double sent_current_A)
       pos_ref(t_s + (1 + POS_KF_ENABLE * POS_KF_DELAY_CYCLES) * CYCLE_TIME_MS / 1000.0,
               &in.r_next_mm, &in.rd_next_mm_s, &in.rdd_next_mm_s2);
       in.y_mm = position_filt_mm;
-      pid = controller_update(&in);
+      ctrl = controller_update(&in);
       /* Shared safety for every controller: limit the output, never send a non-finite value. */
-      pid.output_A = clamp_abs(pid.output_A, OUTPUT_LIMIT_A);
-      if (!isfinite(pid.output_A))
+      ctrl.output_A = clamp_abs(ctrl.output_A, OUTPUT_LIMIT_A);
+      if (!isfinite(ctrl.output_A))
       {
-         pid.output_A = 0.0;
+         ctrl.output_A = 0.0;
       }
    }
-   pid.position_filt_mm = position_filt_mm;
+   ctrl.position_filt_mm = position_filt_mm;
 #if POS_KF_ENABLE
-   pid.kf_velocity_mm_s = kf_out.v_mm_s;
-   pid.kf_innovation_mm = kf_out.innov_mm;
-   pid.kf_innov_std_mm = kf_out.innov_std_mm;
-   pid.kf_pickup_mm = kf_out.pickup_mm;
+   ctrl.kf_velocity_mm_s = kf_out.v_mm_s;
+   ctrl.kf_innovation_mm = kf_out.innov_mm;
+   ctrl.kf_innov_std_mm = kf_out.innov_std_mm;
+   ctrl.kf_pickup_mm = kf_out.pickup_mm;
 #else
-   pid.kf_velocity_mm_s = NAN;
-   pid.kf_innovation_mm = NAN;
-   pid.kf_innov_std_mm = NAN;
-   pid.kf_pickup_mm = NAN;
+   ctrl.kf_velocity_mm_s = NAN;
+   ctrl.kf_innovation_mm = NAN;
+   ctrl.kf_innov_std_mm = NAN;
+   ctrl.kf_pickup_mm = NAN;
 #endif
-   return pid;
+   return ctrl;
 }
 
-#endif /* EXPERIMENT_MODE == EXPERIMENT_POSITION_PID */
+#endif /* EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP */

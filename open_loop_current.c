@@ -6,7 +6,7 @@
 #include "open_loop_current.h"
 #include "waveforms.h"
 
-#if EXPERIMENT_MODE != EXPERIMENT_POSITION_PID
+#if EXPERIMENT_MODE != EXPERIMENT_CLOSED_LOOP
 
 #define MS_(x)  ((int)((x) * 1000))   /* seconds/Hz/A -> integer thousandths, for _Static_assert */
 
@@ -282,4 +282,4 @@ open_loop_current_A(double elapsed_s)
 #endif
 }
 
-#endif /* EXPERIMENT_MODE != EXPERIMENT_POSITION_PID */
+#endif /* EXPERIMENT_MODE != EXPERIMENT_CLOSED_LOOP */

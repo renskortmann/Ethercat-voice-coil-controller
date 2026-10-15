@@ -1,5 +1,5 @@
 /** \file closed_loop_position.h
- * \brief Closed-loop position control (EXPERIMENT_POSITION_PID): the loop around the controller
+ * \brief Closed-loop position control (EXPERIMENT_CLOSED_LOOP): the loop around the controller
  *
  * Per cycle: raw position -> trip check -> EKF -> notches -> controller (controller_*.c) -> output limit.
  * The SMC takes the EKF prediction at the cycle its output acts instead and skips the notches.
@@ -29,9 +29,9 @@
 
 boolean closed_loop_setup(double kp_amps);
 boolean closed_loop_trip_update(double position_mm);
-pid_log_t closed_loop_step(double t_s, double position_mm, double sent_current_A);
+pos_ctrl_log_t closed_loop_step(double t_s, double position_mm, double sent_current_A);
 
-#if EXPERIMENT_MODE == EXPERIMENT_POSITION_PID
+#if EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP
 /** \brief File-name tag, built from the settings: "pos" + controller name + "_" + reference + controller
  *  gains + filters, e.g. posPI_chirp_0.0mm_3.0mm_1.0to5.0Hz_60.0s_hold2.0s_taper1.0s_kp1.0_ki0.12_notch50.0Hz_Q10.0_kfd4
  *  (_kf with POS_KF_DELAY_CYCLES 0, _kfd<D> otherwise; m appended with POS_KF_MAINS_ENABLE, e.g. _kfd4m) */
@@ -88,6 +88,6 @@ pid_log_t closed_loop_step(double t_s, double position_mm, double sent_current_A
 #endif
 
 #define EXPERIMENT_TAG      "pos" POS_CTRL_NAME "_" POS_REF_TAG POS_CTRL_TAG POS_NOTCH_TAG POS_KF_TAG
-#endif /* EXPERIMENT_MODE == EXPERIMENT_POSITION_PID */
+#endif /* EXPERIMENT_MODE == EXPERIMENT_CLOSED_LOOP */
 
 #endif /* CLOSED_LOOP_POSITION_H */

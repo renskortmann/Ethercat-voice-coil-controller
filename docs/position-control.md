@@ -1,6 +1,6 @@
 # Position control: how the loop works
 
-In the `EXPERIMENT_POSITION_PID` mode the PC closes a position loop around the voice coil. You set a position reference in mm. Every 0.5 ms the PC:
+In the `EXPERIMENT_CLOSED_LOOP` mode the PC closes a position loop around the voice coil. You set a position reference in mm. Every 0.5 ms the PC:
 1. reads the laser position;
 2. compares it with the reference;
 3. computes a coil current with a PI or a sliding-mode controller (`POS_CONTROLLER`);
@@ -94,7 +94,7 @@ f(x, v) = (−c·v − C_R/(g0 − x)³ + C_L/(g0 + x)³) / m,   g(x) = (Γ + Γ
 - **Stiffness.** Inside the layer the law is a PD around the model feedforward, with Kp ≈ (m/Γ)·η/`SMC_LAYER_MM`. That is about 200 A/mm at 0.02 mm, against 1 A/mm for the PI. The startup print gives Kp, Kd and the layer pole η/φ.
 - **Sampling limit.** Inside the layer, s(k+1) = (1 − η/φ·Ts)·s(k). Startup refuses η/φ·Ts ≥ 2, where the layer is unstable and the current chatters between ±η·m/Γ ≈ ±4 A. It warns at ≥ 1, where s overshoots. A slow reference (small a) therefore needs a wider layer.
 - **Delay.** Without the one-step prediction, the 0.5 ms output delay costs about 0.13 mm of lag at 20 Hz and 2 mm. With the prediction, the clean-plant error is the same as the notebook's (0.003 mm). On the hardware the current acts about 4 cycles later still (see the EKF **Input** below), so the prediction runs 1 + `POS_KF_DELAY_CYCLES` steps ahead with the currents already sent, and the reference is taken at that same time.
-- **Log.** `pid_p_A` is the equivalent (model) control and `pid_i_A` the switching term; their sum, clamped, is `pid_output_A`.
+- **Log.** `ctrl_p_eq_A` is the equivalent (model) control and `ctrl_i_sw_A` the switching term; their sum, clamped, is `ctrl_output_A`.
 
 ### Position filter (mains notches) — currently ON at 50 + 150 Hz, after the EKF
 **Status:** two notches in cascade behind the EKF, 50 Hz and 150 Hz, both Q = 10 (`POS_NOTCH_ENABLE 1`, `POS_NOTCHES(X) X(50.0, 10.0) X(150.0, 10.0)`), see the EKF section below. Add or remove `X(freq_Hz, Q)` entries to change the set; the file name gets one `_notch<f>Hz_Q<q>` per entry. Their lags add: together 1.1° at 7 Hz, 1.6° at 10 Hz, 1.9° at 12 Hz, 3.5° at 20 Hz. Earlier the single 50 Hz notch on the raw position was switched off, so the PI used the raw position. The notch hides *real* 50 Hz motion from the PI as well as the pickup. That matters for sine references between about 40 and 60 Hz, where it removes or distorts the feedback. The code is kept; set `POS_NOTCH_ENABLE 1` to use it again for references well below 40 Hz. Measured at Kp = 1.0, 5 mm / 1 Hz sine: on vs off gave the same tracking (0.86 vs 0.87 mm rms error), with 50 Hz in the current at 1 vs 83 mA and current noise at 45 vs 80 mA rms.
@@ -124,11 +124,11 @@ A 157 Hz, Q 5 notch on the controller output (to remove the 150 Hz mains harmoni
 - **Combined with the notch.** With both on, the order is EKF → notch: the EKF gets the raw position and the notch filters x(k|k) before the PI. Not the other way round: a notch in front would change the measurement the EKF's model assumes (gain and phase around the notch frequency), make the innovations coloured, and break the innovation check below. Under test: notches at 50 and 150 Hz to remove the mains pickup and its harmonic that the EKF passes on (lag at 7–12 Hz about 1.1–1.9° for both together at Q = 10). File name: `..._notch50.0Hz_Q10.0_notch150.0Hz_Q10.0_kf`. The SMC bypasses the notches; for it (and near 50 Hz, where a notch would remove the reference) the 50 Hz pickup is now a state of the EKF instead, see **Mains pickup** below.
 
 - **What it is.** A C port of `ekf()` in `vca_greybox_fit.ipynb`. It is an extended Kalman filter with state [x, v] and measurement y = x, running every cycle (0.5 ms) on the **raw** laser position. Like the notch, it starts in the first idle-window cycle, seeded with the first sample at rest.
-- **Model.** Method C, with the fitted parameters hard-coded as `VCA_*` in `vca_model.h` (m = 51.5 kg, Γ = 200.9 N/A, Γ₁ = 3573 N/(A·m), c = 1586.3 N·s/m, C_R = 0.001604 N·m³, C_L = 0.001574 N·m³, g₀ = 22.3 mm):
+- **Model.** Method C, with the fitted parameters hard-coded as `VCA_*` in `vca_model.h` (m = 51.5 kg, Γ = 200.9 N/A, Γ₁ = 3573 N/(A·m), c = 1586.3 N·s/m, C_R = 0.001604 N·m³, C_L = 0.001574 N·m³, fitted at g₀ = 22.3 mm). The gap g₀ itself is a rig setting, `MAGNET_GAP_MM` in `run_settings.h` (now 10.0 mm); at a gap other than 22.3 mm the C_R/C_L terms are extrapolated with the 1/g³ law until a refit. Every log file name ends in `_gap<g₀>mm` (before the timestamp); logs without it were taken at 22.3 mm:
   m ẍ = (Γ + Γ₁x) i − c ẋ − (C_R/(g₀−x)³ − C_L/(g₀+x)³).
   - Predict step: one RK4 step, with the input held over the step.
   - Covariance: F = I + A·Ts + (A·Ts)²/2, linearised at the predicted state.
-- **Input.** The model input for the step k−1 → k is the current the master **sent in cycle k−1−D**, D = `POS_KF_DELAY_CYCLES` (4). The model was fitted on the drive's `target_current_A` readback, which trails the sent current (`pid_output_A` one row earlier) by about 4 cycles (2 ms). With D = 0 the filter assumes the current acts at once. `scripts/ekf_delay_scan.py` replays the EKF on a log for D = 0…8; on the 1→40 Hz SMC chirp D = 4 gives the smallest innovation (RMS 0.094 vs 0.137 mm, innovation std / predicted 1.10 vs 1.61) and keeps the filter consistent up to about 25 Hz instead of 15 Hz. The delay does not remove the mean innovation that grows above about 20 Hz (+0.006 mm at 25 Hz for every D): that is model error, not delay. The file name gets `_kfd<D>` instead of `_kf` when D > 0.
+- **Input.** The model input for the step k−1 → k is the current the master **sent in cycle k−1−D**, D = `POS_KF_DELAY_CYCLES` (4). The model was fitted on the drive's `target_current_A` readback, which trails the sent current (`ctrl_output_A` one row earlier) by about 4 cycles (2 ms). With D = 0 the filter assumes the current acts at once. `scripts/ekf_delay_scan.py` replays the EKF on a log for D = 0…8; on the 1→40 Hz SMC chirp D = 4 gives the smallest innovation (RMS 0.094 vs 0.137 mm, innovation std / predicted 1.10 vs 1.61) and keeps the filter consistent up to about 25 Hz instead of 15 Hz. The delay does not remove the mean innovation that grows above about 20 Hz (+0.006 mm at 25 Hz for every D): that is model error, not delay. The file name gets `_kfd<D>` instead of `_kf` when D > 0.
 - **Output.** The PI gets the filtered x(k|k). It is logged as `position_filt_mm`.
 - **Noise.**
   - Process noise: white acceleration, `POS_KF_SIG_A_M_S2` = 7.86 m/s² (the Method C residual on its fit data, from the notebook).
@@ -286,9 +286,9 @@ The CSV in `gcsc_data/` is named, for example, `voice_coil_log_posPI_steps_0.0s0
 | Column | Meaning |
 |---|---|
 | `position_ref_mm` | r(k), the reference this cycle (`nan` in the idle window) |
-| `pid_p_A` | P term |
-| `pid_i_A` | integrator after this cycle's update |
-| `pid_output_A` | u(k), the clamped output. **Sent to the drive in the next cycle.** `target_current_A` (the drive's echo) shows it a row or two later. |
+| `ctrl_p_eq_A` | PI: P term; SMC: equivalent (model) control |
+| `ctrl_i_sw_A` | PI: integrator after this cycle's update; SMC: switching term |
+| `ctrl_output_A` | u(k), the clamped output. **Sent to the drive in the next cycle.** `target_current_A` (the drive's echo) shows it a row or two later. |
 | `position_filt_mm` | y_f(k), the position the PI used: the EKF estimate x(k|k) if `POS_KF_ENABLE` is 1, otherwise `position_mm`; then notched if `POS_NOTCH_ENABLE` is 1 |
 | `kf_velocity_mm_s` | EKF velocity estimate v(k|k) (`nan` unless `POS_KF_ENABLE`) |
 | `kf_innovation_mm` | EKF innovation y(k) − x(k|k−1) (`nan` unless `POS_KF_ENABLE`) |
@@ -309,7 +309,7 @@ trip, filter chain), `controller_pi.c` (the PI), `controller_smc.c` (the SMC), `
 
 | What | Setting |
 |---|---|
-| Select this experiment | `EXPERIMENT_MODE` = `EXPERIMENT_POSITION_PID` (`run_settings.h`) |
+| Select this experiment | `EXPERIMENT_MODE` = `EXPERIMENT_CLOSED_LOOP` (`run_settings.h`) |
 | Run length (after the 3 s idle window) | `RUN_DURATION_S` (`run_settings.h`) (36 s; other experiments need it longer, their checks will tell you) |
 | Reference shape | `POS_REF_SHAPE` = `POS_REF_SHAPE_STEPS`, `POS_REF_SHAPE_SINE`, `POS_REF_SHAPE_CHIRP` or `POS_REF_SHAPE_CHIRP_HOLD` |
 | Step breakpoints | `POS_REF_STEPS(X)`: `X(time_s, position_mm)` entries, numbers with a decimal point |
